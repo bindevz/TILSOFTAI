@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\TILSOFTAI.Orchestration\TILSOFTAI.Orchestration.csproj" />
+    <ProjectReference Include="..\TILSOFTAI.Application\TILSOFTAI.Application.csproj" />
+    <ProjectReference Include="..\TILSOFTAI.Infrastructure\TILSOFTAI.Infrastructure.csproj" />
+    <ProjectReference Include="..\TILSOFTAI.Domain\TILSOFTAI.Domain.csproj" />
+  </ItemGroup>
+</Project>
