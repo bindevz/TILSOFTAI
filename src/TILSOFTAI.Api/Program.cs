@@ -36,20 +36,37 @@ builder.Services.AddScoped<ToolDispatcher>();
 builder.Services.AddSingleton<ResponseParser>();
 builder.Services.AddSingleton<TokenBudget>();
 builder.Services.AddSingleton<ContextManager>();
+builder.Services.AddSingleton<SemanticResolver>();
 builder.Services.AddScoped<OrdersService>();
 builder.Services.AddScoped<CustomersService>();
+builder.Services.AddScoped<ConfirmationPlanService>();
+builder.Services.AddScoped<ModelsService>();
 builder.Services.AddScoped<ChatPipeline>();
 builder.Services.AddSingleton<IAuditLogger, AuditLogger>();
+builder.Services.AddScoped<IConfirmationPlanStore, SqlConfirmationPlanStore>();
+builder.Services.AddScoped<IModelRepository, ModelRepository>();
 
 var lmStudioOptions = new LmStudioOptions();
 builder.Configuration.GetSection("LmStudio").Bind(lmStudioOptions);
 builder.Services.AddSingleton(lmStudioOptions);
 builder.Services.AddHttpClient<LmStudioClient>();
+builder.Services.AddHttpClient<SemanticKernelChatCompletionClient>();
+
+var useSemanticKernel = builder.Configuration.GetValue<bool>("Ai:UseSemanticKernel");
+if (useSemanticKernel)
+{
+    builder.Services.AddScoped<IChatCompletionClient, SemanticKernelChatCompletionClient>();
+}
+else
+{
+    builder.Services.AddScoped<IChatCompletionClient, LmStudioChatCompletionClient>();
+}
 
 builder.Services.Configure<RateLimitOptions>(builder.Configuration.GetSection("RateLimiting"));
 
 var app = builder.Build();
 
+app.UseMiddleware<ExceptionHandlingMiddleware>();
 app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseMiddleware<RateLimitMiddleware>();
 

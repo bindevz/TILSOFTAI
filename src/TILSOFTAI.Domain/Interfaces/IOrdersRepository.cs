@@ -7,4 +7,5 @@ public interface IOrdersRepository
 {
     Task<PagedResult<Order>> QueryAsync(string tenantId, OrderQuery query, CancellationToken cancellationToken);
     Task<OrderSummary> SummarizeAsync(string tenantId, OrderQuery query, CancellationToken cancellationToken);
+    Task CreateAsync(Order order, CancellationToken cancellationToken);
 }

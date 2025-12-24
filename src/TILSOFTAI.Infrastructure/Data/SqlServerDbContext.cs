@@ -8,6 +8,9 @@ public sealed class SqlServerDbContext : DbContext, IUnitOfWork
 {
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<Customer> Customers => Set<Customer>();
+    public DbSet<ProductModel> ProductModels => Set<ProductModel>();
+    public DbSet<ProductModelAttribute> ProductModelAttributes => Set<ProductModelAttribute>();
+    public DbSet<ConfirmationPlanEntity> ConfirmationPlans => Set<ConfirmationPlanEntity>();
 
     public SqlServerDbContext(DbContextOptions<SqlServerDbContext> options) : base(options)
     {
@@ -37,6 +40,10 @@ public sealed class SqlServerDbContext : DbContext, IUnitOfWork
             entity.Property(c => c.TenantId).HasMaxLength(64).IsRequired();
             entity.HasIndex(c => new { c.TenantId, c.Email }).IsUnique();
         });
+
+        modelBuilder.ApplyConfiguration(new TILSOFTAI.Infrastructure.Data.Configurations.ProductModelConfiguration());
+        modelBuilder.ApplyConfiguration(new TILSOFTAI.Infrastructure.Data.Configurations.ProductModelAttributeConfiguration());
+        modelBuilder.ApplyConfiguration(new TILSOFTAI.Infrastructure.Data.Configurations.ConfirmationPlanConfiguration());
     }
 
     public async Task ExecuteTransactionalAsync(Func<CancellationToken, Task> operation, CancellationToken cancellationToken)

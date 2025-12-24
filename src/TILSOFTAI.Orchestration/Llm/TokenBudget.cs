@@ -38,4 +38,13 @@ public sealed class TokenBudget
 
         return result;
     }
+
+    public void EnsureWithinBudget(string content)
+    {
+        var tokens = EstimateTokens(content);
+        if (tokens + ReservedResponseTokens > MaxTokens)
+        {
+            throw new ResponseContractException("Token budget exceeded.");
+        }
+    }
 }

@@ -19,6 +19,13 @@ public sealed class OpenAiChatController : ControllerBase
     public async Task<ActionResult<ChatCompletionResponse>> Post([FromBody] ChatCompletionRequest request, CancellationToken cancellationToken)
     {
         var context = BuildExecutionContext(HttpContext);
+
+        var hasUser = request.Messages?.Any(m => string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(m.Content)) == true;
+        if (!hasUser)
+        {
+            return BadRequest("User message required.");
+        }
+
         var response = await _chatPipeline.HandleAsync(request, context, cancellationToken);
         return Ok(response);
     }

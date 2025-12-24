@@ -17,5 +17,10 @@ public sealed class OrderSummary
     public required int Count { get; init; }
     public required decimal TotalAmount { get; init; }
     public required decimal AverageAmount { get; init; }
+    public required decimal MinAmount { get; init; }
+    public required decimal MaxAmount { get; init; }
     public required IReadOnlyDictionary<OrderStatus, int> CountByStatus { get; init; }
+    public required IReadOnlyCollection<TopCustomerSpend> TopCustomers { get; init; }
 }
+
+public sealed record TopCustomerSpend(Guid CustomerId, string? CustomerName, decimal TotalAmount, int OrderCount);

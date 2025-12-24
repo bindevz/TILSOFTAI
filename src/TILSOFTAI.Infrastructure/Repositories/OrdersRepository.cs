@@ -37,54 +37,71 @@ public sealed class OrdersRepository : IOrdersRepository
 
     public async Task<OrderSummary> SummarizeAsync(string tenantId, OrderQuery query, CancellationToken cancellationToken)
     {
-        var scoped = ApplyFilters(_dbContext.Orders.AsNoTracking(), tenantId, query)
-            .OrderBy(o => o.Id);
+        var scoped = ApplyFilters(_dbContext.Orders.AsNoTracking(), tenantId, query);
 
-        const int batchSize = 500;
-        var offset = 0;
-        var totalAmount = 0m;
-        var totalCount = 0;
-        var countByStatus = new Dictionary<OrderStatus, int>();
-
-        while (true)
+        var totalCount = await scoped.CountAsync(cancellationToken);
+        if (totalCount == 0)
         {
-            var batch = await scoped
-                .Skip(offset)
-                .Take(batchSize)
-                .Select(o => new { o.TotalAmount, o.Status })
-                .ToListAsync(cancellationToken);
-
-            if (batch.Count == 0)
+            return new OrderSummary
             {
-                break;
-            }
-
-            foreach (var item in batch)
-            {
-                totalCount++;
-                totalAmount += item.TotalAmount;
-                countByStatus[item.Status] = countByStatus.TryGetValue(item.Status, out var count)
-                    ? count + 1
-                    : 1;
-            }
-
-            if (batch.Count < batchSize)
-            {
-                break;
-            }
-
-            offset += batchSize;
+                Count = 0,
+                TotalAmount = 0,
+                AverageAmount = 0,
+                MinAmount = 0,
+                MaxAmount = 0,
+                CountByStatus = new Dictionary<OrderStatus, int>(),
+                TopCustomers = Array.Empty<TopCustomerSpend>()
+            };
         }
 
-        var average = totalCount == 0 ? 0 : totalAmount / totalCount;
+        var aggregates = await scoped.GroupBy(o => 1)
+            .Select(g => new
+            {
+                TotalAmount = g.Sum(x => x.TotalAmount),
+                MinAmount = g.Min(x => x.TotalAmount),
+                MaxAmount = g.Max(x => x.TotalAmount)
+            })
+            .FirstAsync(cancellationToken);
+
+        var countByStatus = await scoped
+            .GroupBy(o => o.Status)
+            .Select(g => new { Status = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(k => k.Status, v => v.Count, cancellationToken);
+
+        var topCustomers = await scoped
+            .GroupBy(o => o.CustomerId)
+            .Select(g => new
+            {
+                CustomerId = g.Key,
+                TotalAmount = g.Sum(x => x.TotalAmount),
+                OrderCount = g.Count()
+            })
+            .OrderByDescending(x => x.TotalAmount)
+            .Take(5)
+            .Join(_dbContext.Customers.AsNoTracking().Where(c => c.TenantId == tenantId),
+                g => g.CustomerId,
+                c => c.Id,
+                (g, c) => new TopCustomerSpend(g.CustomerId, c.Name, g.TotalAmount, g.OrderCount))
+            .ToListAsync(cancellationToken);
+
+        var average = aggregates.TotalAmount / totalCount;
 
         return new OrderSummary
         {
             Count = totalCount,
-            TotalAmount = totalAmount,
+            TotalAmount = aggregates.TotalAmount,
             AverageAmount = average,
-            CountByStatus = countByStatus
+            MinAmount = aggregates.MinAmount,
+            MaxAmount = aggregates.MaxAmount,
+            CountByStatus = countByStatus,
+            TopCustomers = topCustomers
         };
+    }
+
+    public Task CreateAsync(Order order, CancellationToken cancellationToken)
+    {
+        _dbContext.Orders.Add(order);
+        return Task.CompletedTask;
     }
 
     private static IQueryable<Order> ApplyFilters(IQueryable<Order> queryable, string tenantId, OrderQuery query)
