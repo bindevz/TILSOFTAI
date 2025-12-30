@@ -1,8 +1,13 @@
-using System.Security;
+﻿using Microsoft.SemanticKernel;
+using Microsoft.SemanticKernel.ChatCompletion;
+using Microsoft.SemanticKernel.Connectors.OpenAI;
 using System.Text.Json;
-using TILSOFTAI.Application.Permissions;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Orchestration.Llm;
+using TILSOFTAI.Orchestration.SK;
+using TILSOFTAI.Orchestration.SK.Governance;
+using TILSOFTAI.Orchestration.SK.Planning;
+using TILSOFTAI.Orchestration.SK.Plugins;
 using TILSOFTAI.Orchestration.Tools;
 using ExecutionContext = TILSOFTAI.Domain.ValueObjects.ExecutionContext;
 
@@ -10,237 +15,164 @@ namespace TILSOFTAI.Orchestration.Chat;
 
 public sealed class ChatPipeline
 {
-    private readonly IChatCompletionClient _chatClient;
-    private readonly ResponseParser _responseParser;
+    private readonly SkKernelFactory _kernelFactory;
+    private readonly ExecutionContextAccessor _ctxAccessor;
     private readonly ToolRegistry _toolRegistry;
     private readonly ToolDispatcher _toolDispatcher;
-    private readonly ContextManager _contextManager;
+    private readonly CommitGuardFilter _commitGuard;
     private readonly TokenBudget _tokenBudget;
     private readonly IAuditLogger _auditLogger;
-    private readonly RbacService _rbacService;
+    private readonly PlannerRouter _plannerRouter;
+    private readonly StepwiseLoopRunner _stepwiseLoopRunner;
     private readonly JsonSerializerOptions _serializerOptions = new(JsonSerializerDefaults.Web);
 
+    //Plugin
+
     public ChatPipeline(
-        IChatCompletionClient chatClient,
-        ResponseParser responseParser,
+        SkKernelFactory kernelFactory,
+        ExecutionContextAccessor ctxAccessor,
         ToolRegistry toolRegistry,
         ToolDispatcher toolDispatcher,
-        ContextManager contextManager,
+        CommitGuardFilter commitGuard,
         TokenBudget tokenBudget,
         IAuditLogger auditLogger,
-        RbacService rbacService)
+        PlannerRouter plannerRouter,
+        StepwiseLoopRunner stepwiseLoopRunner)
     {
-        _chatClient = chatClient;
-        _responseParser = responseParser;
+        _kernelFactory = kernelFactory;
+        _ctxAccessor = ctxAccessor;
         _toolRegistry = toolRegistry;
         _toolDispatcher = toolDispatcher;
-        _contextManager = contextManager;
+        _commitGuard = commitGuard;
         _tokenBudget = tokenBudget;
         _auditLogger = auditLogger;
-        _rbacService = rbacService;
+        _plannerRouter = plannerRouter;
+        _stepwiseLoopRunner = stepwiseLoopRunner;
     }
 
     public async Task<ChatCompletionResponse> HandleAsync(ChatCompletionRequest request, ExecutionContext context, CancellationToken cancellationToken)
     {
         var serializedRequest = JsonSerializer.Serialize(request, _serializerOptions);
 
-        var incomingMessages = request.Messages ?? Array.Empty<ChatCompletionMessage>(); // 1. Receive user input
+        var incomingMessages = request.Messages ?? Array.Empty<ChatCompletionMessage>();
+
         if (incomingMessages.Any(m => !IsSupportedRole(m.Role)))
         {
             return BuildFailureResponse("Unsupported message role.", request.Model, Array.Empty<ChatCompletionMessage>());
         }
 
-        var hasUser = incomingMessages.Any(m => string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(m.Content));
+        var hasUser = incomingMessages.Any(m =>
+            string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(m.Content));
+
         if (!hasUser)
         {
             return BuildFailureResponse("User message required.", request.Model, Array.Empty<ChatCompletionMessage>());
         }
 
-        var lastUserMessage = incomingMessages.Last(m => string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(m.Content)).Content!;
+        var lastUserMessage = incomingMessages.Last(m =>
+            string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(m.Content)).Content;
 
-        var promptMessages = _contextManager.PrepareMessages(incomingMessages);
+        // 1) set context for plugins/filters
+        _ctxAccessor.Context = context;
+        _ctxAccessor.ConfirmedConfirmationId = TryExtractConfirmationId(lastUserMessage);
 
-        var systemPrompt = PromptPolicy.BuildPrompt(_toolRegistry.GetToolNames()); // 2. Inject system prompt
+        // 2) build kernel
+        var kernel = _kernelFactory.CreateKernel(request.Model);
 
-        string rawContent;
-        try
-        {
-            rawContent = await _chatClient.GetCompletionAsync(request.Model, promptMessages, systemPrompt, 256, 0.0, cancellationToken)
-                ?? throw new ResponseContractException("AI response was empty."); // 3. Call LLM
-        }
-        catch (Exception)
-        {
-            return BuildFailureResponse("AI response unavailable.", request.Model, promptMessages);
-        }
+        // 3) register module plugins (bạn uncomment sau khi đã inject plugins theo module)
+        var modules = _moduleRouter.SelectModules(lastUserMessage, context);
 
-        ToolInvocation invocation;
-        try
+        foreach (var module in modules)
         {
-            invocation = _responseParser.Parse(rawContent); // 4. Strict JSON parsing
-        }
-        catch (ResponseContractException)
-        {
-            return BuildFailureResponse("AI output invalid.", request.Model, promptMessages);
-        }
+            if (!_catalog.ByModule.TryGetValue(module, out var types)) continue;
 
-        if (!_toolRegistry.IsWhitelisted(invocation.Tool)) // 5. Tool whitelist validation
-        {
-            return BuildFailureResponse("Tool not allowed.", request.Model, promptMessages);
-        }
-
-        if (!_toolRegistry.TryValidate(invocation.Tool, invocation.Arguments, out var intent, out var validationError, out var requiresWrite)) // 6. JSON schema validation
-        {
-            return BuildFailureResponse(validationError ?? "Invalid arguments.", request.Model, promptMessages);
-        }
-
-        try // 7. RBAC validation
-        {
-            if (requiresWrite)
+            foreach (var t in types)
             {
-                _rbacService.EnsureWriteAllowed(invocation.Tool, context);
+                var plugin = _sp.GetRequiredService(t);
+                kernel.Plugins.AddFromObject(plugin, module);
+            }
+        }
+
+        // 4) governance filter: chọn 1 trong 2 dòng dưới tùy interface bạn implement
+        // Nếu CommitGuardFilter : IAutoFunctionInvocationFilter
+        kernel.AutoFunctionInvocationFilters.Add(_commitGuard);
+        // Nếu CommitGuardFilter : IFunctionInvocationFilter thì dùng:
+        // kernel.FunctionInvocationFilters.Add(_commitGuard);
+
+        // 5) build chat history
+        var history = new ChatHistory();
+        history.AddSystemMessage(BuildSystemPrompt());
+
+        foreach (var m in incomingMessages)
+        {
+            if (!string.IsNullOrWhiteSpace(m.Content))
+            {
+                history.AddMessage(ToAuthorRole(m.Role), m.Content);
+            }
+        }
+
+        // 6) 01 model - internal routing
+        var useLoop = _plannerRouter.ShouldUseLoop(lastUserMessage);
+
+        string content;
+        try
+        {
+            if (useLoop)
+            {
+                content = await _stepwiseLoopRunner.RunAsync(kernel, history, maxIterations: 8, ct: cancellationToken);
             }
             else
             {
-                _rbacService.EnsureReadAllowed(invocation.Tool, context);
+                var chat = kernel.GetRequiredService<IChatCompletionService>();
+                var settings = new OpenAIPromptExecutionSettings
+                {
+                    FunctionChoiceBehavior = FunctionChoiceBehavior.Auto()
+                };
+
+                var msg = await chat.GetChatMessageContentAsync(history, settings, kernel, cancellationToken);
+                content = (msg.Content ?? string.Empty).Replace("__DONE__", "", StringComparison.OrdinalIgnoreCase).Trim();
             }
         }
-        catch (SecurityException)
+        catch
         {
-            return BuildFailureResponse("Forbidden.", request.Model, promptMessages);
+            return BuildFailureResponse("AI response unavailable.", request.Model, incomingMessages);
         }
 
-        ToolDispatchResult dispatchResult;
-        try
-        {
-            dispatchResult = await _toolDispatcher.DispatchAsync(invocation.Tool, intent!, context, requiresWrite, cancellationToken); // 8-9. Business context normalization + execution
-        }
-        catch (ResponseContractException)
-        {
-            return BuildFailureResponse("Normalization failed.", request.Model, promptMessages);
-        }
+        await _auditLogger.LogUserInputAsync(context, serializedRequest, cancellationToken);
 
-        await _auditLogger.LogUserInputAsync(context, serializedRequest, cancellationToken); // 10. Audit logging
-        await _auditLogger.LogAiDecisionAsync(context, rawContent, cancellationToken);
-        await _auditLogger.LogToolExecutionAsync(context, invocation.Tool, dispatchResult.NormalizedIntent, new { dispatchResult.Result.Success, dispatchResult.Result.Message, dispatchResult.Result.Data }, cancellationToken);
+        var response = BuildResponse(request.Model ?? "tilsoftai-orchestrator", content, incomingMessages);
+        _tokenBudget.EnsureWithinBudget(response.Choices.First().Message.Content);
+        return response;
+    }
 
-        if (!dispatchResult.Result.Success)
-        {
-            return BuildFailureResponse("Tool execution failed.", request.Model, promptMessages);
-        }
+    private static string BuildSystemPrompt() => """
+        Bạn là trợ lý nghiệp vụ ERP.
 
-        var answerMessages = BuildAnswerMessages(lastUserMessage, invocation, dispatchResult);
-        var answerContent = await GetAnswerAsync(request.Model, answerMessages, cancellationToken);
+        Quy tắc công cụ (tools/functions):
+        - Nếu yêu cầu CẦN dữ liệu nội bộ (giá, tồn kho, đơn hàng, khách hàng, model, doanh số...) thì PHẢI gọi tools để lấy evidence.
+        - Nếu KHÔNG có tool phù hợp hoặc câu hỏi KHÔNG cần dữ liệu nội bộ, bạn được trả lời tự nhiên như một chatbot thông thường.
+        - Tuyệt đối không bịa dữ liệu nội bộ khi chưa có evidence từ tool.
+        - Chỉ được gọi các tools có trong danh sách hệ thống cung cấp. Tuyệt đối không tự bịa tool (ví dụ: functions.prepare).
+        - Thao tác ghi (create/update/commit) phải theo 2 bước: prepare -> yêu cầu xác nhận -> commit.
+        - Người dùng xác nhận bằng: XÁC NHẬN <confirmation_id>.
 
-        if (string.IsNullOrWhiteSpace(answerContent))
-        {
-            var fallback = BuildSuccessResponse(invocation.Tool, dispatchResult.Result, request.Model, answerMessages);
-            _tokenBudget.EnsureWithinBudget(fallback.Choices.First().Message.Content);
-            return fallback;
-        }
+        Kết thúc:
+        - Nếu bạn đã hoàn thành câu trả lời cuối cùng, hãy kết thúc bằng token: __DONE__.
+        - Nếu còn cần gọi tools hoặc cần hỏi thêm, KHÔNG dùng __DONE__.
+        """;
 
-        var naturalResponse = BuildResponse(request.Model, answerContent, answerMessages);
-        _tokenBudget.EnsureWithinBudget(naturalResponse.Choices.First().Message.Content);
-        return naturalResponse;
+    private static string? TryExtractConfirmationId(string text)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(text, @"(?i)\b(xác\s*nhận|confirm)\b[^a-f0-9]*([a-f0-9]{32})\b");
+        return m.Success ? m.Groups[2].Value : null;
     }
 
     private ChatCompletionResponse BuildFailureResponse(string error, string? model, IReadOnlyCollection<ChatCompletionMessage> promptMessages)
     {
         var payload = JsonSerializer.Serialize(new { error }, _serializerOptions);
         return BuildResponse(model, payload, promptMessages);
-    }
-
-    private ChatCompletionResponse BuildSuccessResponse(string tool, ToolExecutionResult result, string? model, IReadOnlyCollection<ChatCompletionMessage> promptMessages)
-    {
-        var payload = JsonSerializer.Serialize(new
-        {
-            tool,
-            result.Message,
-            result.Data
-        }, _serializerOptions);
-
-        return BuildResponse(model, payload, promptMessages);
-    }
-
-    private async Task<string?> GetAnswerAsync(string? model, IReadOnlyCollection<ChatCompletionMessage> messages, CancellationToken cancellationToken)
-    {
-        try
-        {
-            return await _chatClient.GetCompletionAsync(model, messages, AnswerPromptPolicy.BasePrompt, 512, 0.2, cancellationToken);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private IReadOnlyCollection<ChatCompletionMessage> BuildAnswerMessages(string lastUserMessage, ToolInvocation invocation, ToolDispatchResult dispatchResult)
-    {
-        var evidence = new
-        {
-            tool = invocation.Tool,
-            normalizedIntent = dispatchResult.NormalizedIntent,
-            result = new
-            {
-                message = dispatchResult.Result.Message,
-                data = dispatchResult.Result.Data
-            }
-        };
-
-        var evidenceJson = JsonSerializer.Serialize(evidence, _serializerOptions);
-        var confirmationId = ExtractConfirmationId(dispatchResult.Result.Data);
-
-        var userPrompt = confirmationId is null
-            ? lastUserMessage
-            : $"{lastUserMessage}\nPlease ask for confirmation using confirmation id: {confirmationId}.";
-
-        return new[]
-        {
-            new ChatCompletionMessage { Role = "user", Content = userPrompt },
-            new ChatCompletionMessage { Role = "assistant", Content = $"EVIDENCE: {evidenceJson}" }
-        };
-    }
-
-    private string? ExtractConfirmationId(object? data)
-    {
-        if (data is null)
-        {
-            return null;
-        }
-
-        try
-        {
-            using var doc = JsonDocument.Parse(JsonSerializer.Serialize(data, _serializerOptions));
-            if (doc.RootElement.ValueKind == JsonValueKind.Object)
-            {
-                if (TryGetProperty(doc.RootElement, "confirmationId", out var id) ||
-                    TryGetProperty(doc.RootElement, "confirmation_id", out id))
-                {
-                    return id;
-                }
-            }
-        }
-        catch
-        {
-            return null;
-        }
-
-        return null;
-    }
-
-    private static bool TryGetProperty(JsonElement element, string propertyName, out string? value)
-    {
-        value = null;
-        if (element.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.String)
-        {
-            var text = prop.GetString();
-            if (!string.IsNullOrWhiteSpace(text))
-            {
-                value = text;
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private ChatCompletionResponse BuildResponse(string? model, string content, IReadOnlyCollection<ChatCompletionMessage> promptMessages)
@@ -276,10 +208,26 @@ public sealed class ChatPipeline
         };
     }
 
+    //private static bool IsSupportedRole(string? role)
+    //{
+    //    return string.Equals(role, "user", StringComparison.OrdinalIgnoreCase) ||
+    //           string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase) ||
+    //           string.Equals(role, "system", StringComparison.OrdinalIgnoreCase);
+    //}
+    private static AuthorRole ToAuthorRole(string? role)
+    {
+        if (string.Equals(role, "user", StringComparison.OrdinalIgnoreCase)) return AuthorRole.User;
+        if (string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase)) return AuthorRole.Assistant;
+        if (string.Equals(role, "system", StringComparison.OrdinalIgnoreCase)) return AuthorRole.System;
+
+        // fallback an toàn: coi như user
+        return AuthorRole.User;
+    }
+
     private static bool IsSupportedRole(string? role)
     {
-        return string.Equals(role, "user", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(role, "system", StringComparison.OrdinalIgnoreCase);
+        return string.Equals(role, "user", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(role, "system", StringComparison.OrdinalIgnoreCase);
     }
 }

@@ -9,6 +9,8 @@ using TILSOFTAI.Infrastructure.Observability;
 using TILSOFTAI.Infrastructure.Repositories;
 using TILSOFTAI.Orchestration.Chat;
 using TILSOFTAI.Orchestration.Llm;
+using TILSOFTAI.Orchestration.SK;
+using TILSOFTAI.Orchestration.SK.Plugins;
 using TILSOFTAI.Orchestration.Tools;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -51,6 +53,23 @@ builder.Configuration.GetSection("LmStudio").Bind(lmStudioOptions);
 builder.Services.AddSingleton(lmStudioOptions);
 builder.Services.AddHttpClient<LmStudioClient>();
 builder.Services.AddHttpClient<SemanticKernelChatCompletionClient>();
+
+//AI
+// SK infra
+builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.SkKernelFactory>();
+builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.ExecutionContextAccessor>();
+builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.ToolInvoker>();
+
+// Tool invoker (bridge to existing ToolRegistry/ToolDispatcher)
+builder.Services.AddScoped<ToolInvoker>();
+
+// Plugins per module
+builder.Services.AddSingleton<PluginCatalog>();
+
+// Governance + Planner
+builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.Governance.CommitGuardFilter>();
+builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.Planning.PlannerRouter>();
+builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.Planning.StepwiseLoopRunner>();
 
 var useSemanticKernel = builder.Configuration.GetValue<bool>("Ai:UseSemanticKernel");
 if (useSemanticKernel)
