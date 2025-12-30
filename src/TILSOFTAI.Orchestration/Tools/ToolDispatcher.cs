@@ -1,6 +1,5 @@
 using TILSOFTAI.Application.Permissions;
 using TILSOFTAI.Application.Services;
-using TILSOFTAI.Domain.Entities;
 using TILSOFTAI.Domain.ValueObjects;
 using TILSOFTAI.Orchestration.Chat;
 using TILSOFTAI.Orchestration.Llm;

@@ -1,6 +1,7 @@
 ﻿using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Connectors.OpenAI;
+using Microsoft.Extensions.DependencyInjection;
 using System.Text.Json;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Orchestration.Llm;
@@ -26,6 +27,10 @@ public sealed class ChatPipeline
     private readonly StepwiseLoopRunner _stepwiseLoopRunner;
     private readonly JsonSerializerOptions _serializerOptions = new(JsonSerializerDefaults.Web);
 
+    private readonly IServiceProvider _serviceProvider;
+    private readonly PluginCatalog _pluginCatalog;
+    private readonly ModuleRouter _moduleRouter;
+
     //Plugin
 
     public ChatPipeline(
@@ -37,7 +42,10 @@ public sealed class ChatPipeline
         TokenBudget tokenBudget,
         IAuditLogger auditLogger,
         PlannerRouter plannerRouter,
-        StepwiseLoopRunner stepwiseLoopRunner)
+        StepwiseLoopRunner stepwiseLoopRunner,
+        IServiceProvider serviceProvider,
+        PluginCatalog pluginCatalog,
+        ModuleRouter moduleRouter)
     {
         _kernelFactory = kernelFactory;
         _ctxAccessor = ctxAccessor;
@@ -48,6 +56,9 @@ public sealed class ChatPipeline
         _auditLogger = auditLogger;
         _plannerRouter = plannerRouter;
         _stepwiseLoopRunner = stepwiseLoopRunner;
+        _serviceProvider = serviceProvider;
+        _pluginCatalog = pluginCatalog;
+        _moduleRouter = moduleRouter;
     }
 
     public async Task<ChatCompletionResponse> HandleAsync(ChatCompletionRequest request, ExecutionContext context, CancellationToken cancellationToken)
@@ -86,12 +97,13 @@ public sealed class ChatPipeline
 
         foreach (var module in modules)
         {
-            if (!_catalog.ByModule.TryGetValue(module, out var types)) continue;
+            if (!_pluginCatalog.ByModule.TryGetValue(module, out var types)) continue;
 
             foreach (var t in types)
             {
-                var plugin = _sp.GetRequiredService(t);
-                kernel.Plugins.AddFromObject(plugin, module);
+                var plugin = _serviceProvider.GetRequiredService(t);
+                var pluginName = ToPluginName(t.Name);
+                kernel.Plugins.AddFromObject(plugin, pluginName);
             }
         }
 
@@ -107,10 +119,10 @@ public sealed class ChatPipeline
 
         foreach (var m in incomingMessages)
         {
-            if (!string.IsNullOrWhiteSpace(m.Content))
-            {
-                history.AddMessage(ToAuthorRole(m.Role), m.Content);
-            }
+            if (string.IsNullOrWhiteSpace(m.Content)) continue;
+            if (string.Equals(m.Role, "system", StringComparison.OrdinalIgnoreCase)) continue;
+
+            history.AddMessage(ToAuthorRole(m.Role), m.Content);
         }
 
         // 6) 01 model - internal routing
@@ -142,7 +154,7 @@ public sealed class ChatPipeline
 
         await _auditLogger.LogUserInputAsync(context, serializedRequest, cancellationToken);
 
-        var response = BuildResponse(request.Model ?? "tilsoftai-orchestrator", content, incomingMessages);
+        var response = BuildResponse(request.Model ?? "TILSOFT-AI", content, incomingMessages);
         _tokenBudget.EnsureWithinBudget(response.Choices.First().Message.Content);
         return response;
     }
@@ -230,4 +242,16 @@ public sealed class ChatPipeline
             || string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase)
             || string.Equals(role, "system", StringComparison.OrdinalIgnoreCase);
     }
+
+    private static string ToPluginName(string typeName)
+    {
+        const string suffix = "ToolsPlugin";
+        var name = typeName.EndsWith(suffix, StringComparison.Ordinal)
+            ? typeName[..^suffix.Length]
+            : typeName;
+
+        if (string.IsNullOrWhiteSpace(name)) return "common";
+        return char.ToLowerInvariant(name[0]) + name.Substring(1);
+    }
+
 }

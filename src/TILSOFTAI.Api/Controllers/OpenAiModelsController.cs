@@ -18,12 +18,12 @@ public sealed class OpenAiModelsController : ControllerBase
             {
                 new
                 {
-                    id = "tilsoftai-orchestrator",
+                    id = "TILSOFT-AI",
                     @object = "model",
                     created = now,
                     owned_by = "tilsoftai",
                     permission = Array.Empty<object>(),
-                    root = "tilsoftai-orchestrator",
+                    root = "TILSOFT-AI",
                     parent = (string?)null
                 }
             }
