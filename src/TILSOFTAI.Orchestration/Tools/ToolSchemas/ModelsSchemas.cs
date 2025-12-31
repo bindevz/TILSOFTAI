@@ -6,11 +6,14 @@ public static class ModelsSchemas
 {
     public static ValidationResult<ModelSearchIntent> ValidateSearch(JsonElement args)
     {
-        var category = GetString(args, "category");
-        var name = GetString(args, "name");
+        var rangeName = GetString(args, "rangeName");
+        var modelCode = GetString(args, "modelCode");
+        var modelName = GetString(args, "modelName");
+        var season = GetString(args, "season");
+        var collection = GetString(args, "collection");
         var page = RequireInt(args, "page");
         var size = RequireInt(args, "pageSize");
-        return ValidationResult<ModelSearchIntent>.Success(new ModelSearchIntent(category, name, page, size));
+        return ValidationResult<ModelSearchIntent>.Success(new ModelSearchIntent(rangeName, modelCode, modelName, season, collection, page, size));
     }
 
     public static ValidationResult<ModelGetIntent> ValidateGet(JsonElement args)

@@ -23,18 +23,18 @@ public sealed class ModelsService
         _auditLogger = auditLogger;
     }
 
-    public Task<PagedResult<ProductModel>> SearchAsync(string? category, string? name, int page, int size, ExecutionContext context, CancellationToken cancellationToken)
+    public Task<PagedResult<Model>> SearchAsync(string tenantId, string? rangeName, string? modelCode, string? modelName, string? season, string? collection, int page, int size, ExecutionContext context, CancellationToken cancellationToken)
     {
         BusinessValidators.ValidatePage(page, size);
-        return _modelRepository.SearchAsync(context.TenantId, category, name, page, size, cancellationToken);
+        return _modelRepository.SearchAsync(context.TenantId, rangeName, modelCode, modelName, season, collection, page, size, cancellationToken);
     }
 
-    public Task<ProductModel?> GetAsync(Guid id, ExecutionContext context, CancellationToken cancellationToken)
+    public Task<Model?> GetAsync(Guid id, ExecutionContext context, CancellationToken cancellationToken)
     {
         return _modelRepository.GetAsync(context.TenantId, id, cancellationToken);
     }
 
-    public Task<IReadOnlyCollection<ProductModelAttribute>> ListAttributesAsync(Guid modelId, ExecutionContext context, CancellationToken cancellationToken)
+    public Task<IReadOnlyCollection<ModelAttribute>> ListAttributesAsync(Guid modelId, ExecutionContext context, CancellationToken cancellationToken)
     {
         return _modelRepository.ListAttributesAsync(context.TenantId, modelId, cancellationToken);
     }
@@ -81,7 +81,7 @@ public sealed class ModelsService
         };
     }
 
-    public async Task<ProductModel> CommitCreateAsync(string confirmationId, ExecutionContext context, CancellationToken cancellationToken)
+    public async Task<Model> CommitCreateAsync(string confirmationId, ExecutionContext context, CancellationToken cancellationToken)
     {
         var plan = await _planService.ConsumePlanAsync(confirmationId, "models.create", context, cancellationToken);
         var name = plan.Data["name"];
@@ -89,21 +89,21 @@ public sealed class ModelsService
         var basePrice = decimal.Parse(plan.Data["basePrice"], NumberStyles.Number, CultureInfo.InvariantCulture);
         var attributes = DeserializeAttributes(plan.Data["attributes"]);
 
-        var model = new ProductModel
+        var model = new Model
         {
-            Id = Guid.NewGuid(),
-            TenantId = context.TenantId,
-            Name = name,
-            Category = category,
-            BasePrice = basePrice,
-            CreatedAt = DateTimeOffset.UtcNow,
-            UpdatedAt = DateTimeOffset.UtcNow,
-            Attributes = attributes.Select(kvp => new ProductModelAttribute
-            {
-                Id = Guid.NewGuid(),
-                Name = kvp.Key,
-                Value = kvp.Value
-            }).ToList()
+            //Id = Guid.NewGuid(),
+            //TenantId = context.TenantId,
+            //Name = name,
+            //Category = category,
+            //BasePrice = basePrice,
+            //CreatedAt = DateTimeOffset.UtcNow,
+            //UpdatedAt = DateTimeOffset.UtcNow,
+            //Attributes = attributes.Select(kvp => new ModelAttribute
+            //{
+            //    Id = Guid.NewGuid(),
+            //    Name = kvp.Key,
+            //    Value = kvp.Value
+            //}).ToList()
         };
 
         await _unitOfWork.ExecuteTransactionalAsync(async ct =>
@@ -111,7 +111,7 @@ public sealed class ModelsService
             await _modelRepository.CreateAsync(model, ct);
         }, cancellationToken);
 
-        await _auditLogger.LogToolExecutionAsync(context, "models.create.commit", new { confirmationId }, new { model.Id, model.Name, model.Category }, cancellationToken);
+        await _auditLogger.LogToolExecutionAsync(context, "models.create.commit", new { confirmationId }, new { model.ModelID, model.ModelUD, model.ModelNM }, cancellationToken);
         return model;
     }
 

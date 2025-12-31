@@ -1,5 +1,7 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
+using TILSOFTAI.Api.Security;
 using TILSOFTAI.Orchestration.Chat;
+using static System.Net.WebRequestMethods;
 
 namespace TILSOFTAI.Api.Controllers;
 
@@ -40,11 +42,28 @@ public sealed class OpenAiChatController : ControllerBase
             ? userHeader.ToString()
             : "anonymous";
 
-        var rolesHeader = httpContext.Request.Headers.TryGetValue("X-Roles", out var roles)
-            ? roles.ToString()
-            : string.Empty;
+        // 1) Try roles from X-Roles first (nếu bạn vẫn muốn hỗ trợ)
+        var rolesHeader = httpContext.Request.Headers["X-Roles"].ToString();
+        var roles = rolesHeader
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
 
-        var rolesArray = rolesHeader.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        // 2) Nếu không có roles -> try từ JWT
+        if (roles.Count == 0)
+        {
+            var auth = httpContext.Request.Headers.Authorization.ToString();
+            if (auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            {
+                var token = auth.Substring("Bearer ".Length).Trim();
+                roles = JwtRoleExtractor.TryExtractRoles(token);
+            }
+        }
+
+        // 3) Nếu vẫn rỗng -> default viewer (read-only) hoặc deny tuỳ policy
+        if (roles.Count == 0)
+            roles.Add("user"); // hoặc để rỗng và deny
+
+        //var rolesArray = rolesHeader.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var correlationId = httpContext.Items.TryGetValue("X-Correlation-Id", out var correlation) && correlation is string correlationValue
             ? correlationValue
             : httpContext.TraceIdentifier;
@@ -53,8 +72,41 @@ public sealed class OpenAiChatController : ControllerBase
         {
             TenantId = tenantId,
             UserId = userId,
-            Roles = rolesArray,
+            Roles = roles,
             CorrelationId = correlationId
         };
     }
+
+    //private TILSOFTAI.Domain.ValueObjects.ExecutionContext BuildExecutionContext(HttpContext http)
+    //{
+    //    var userId = http.Request.Headers["X-User-Id"].ToString();
+    //    var tenantId = http.Request.Headers["X-Tenant-Id"].ToString();
+
+    //    // 1) Try roles from X-Roles first (nếu bạn vẫn muốn hỗ trợ)
+    //    var rolesHeader = http.Request.Headers["X-Roles"].ToString();
+    //    var roles = rolesHeader
+    //        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+    //        .ToList();
+
+    //    // 2) Nếu không có roles -> try từ JWT
+    //    if (roles.Count == 0)
+    //    {
+    //        var auth = http.Request.Headers.Authorization.ToString();
+    //        if (auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+    //        {
+    //            var token = auth.Substring("Bearer ".Length).Trim();
+    //            roles = JwtRoleExtractor.TryExtractRoles(token);
+    //        }
+    //    }
+
+    //    // 3) Nếu vẫn rỗng -> default viewer (read-only) hoặc deny tuỳ policy
+    //    if (roles.Count == 0)
+    //        roles.Add("viewer"); // hoặc để rỗng và deny
+
+    //    return new TILSOFTAI.Domain.ValueObjects.ExecutionContext(
+    //        TenantId: string.IsNullOrWhiteSpace(tenantId) ? "default" : tenantId,
+    //        userId: string.IsNullOrWhiteSpace(userId) ? "webui" : userId,
+    //        roles: roles.ToArray()
+    //    );
+    //}
 }

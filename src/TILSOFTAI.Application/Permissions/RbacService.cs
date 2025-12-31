@@ -5,24 +5,24 @@ namespace TILSOFTAI.Application.Permissions;
 
 public sealed class RbacService
 {
-    private static readonly string[] ReadRoles = { "admin", "ops", "analyst", "viewer" };
+    private static readonly string[] ReadRoles = { "admin", "ops", "analyst", "user" };
     private static readonly string[] WriteRoles = { "admin", "ops" };
-    private static readonly string[] ModelReadRoles = { "admin", "ops", "analyst", "viewer", "product-read" };
-    private static readonly string[] ModelWriteRoles = { "admin", "ops", "product-owner" };
     private static readonly Dictionary<string, string[]> ToolRoles = new(StringComparer.OrdinalIgnoreCase)
     {
         ["orders.query"] = ReadRoles,
         ["orders.summary"] = ReadRoles,
+        ["orders.create.prepare"] = WriteRoles,
+        ["orders.create.commit"] = WriteRoles,
+
         ["customers.updateEmail"] = WriteRoles,
         ["customers.search"] = ReadRoles,
-        ["models.search"] = ModelReadRoles,
-        ["models.get"] = ModelReadRoles,
-        ["models.attributes.list"] = ModelReadRoles,
-        ["models.price.analyze"] = ModelReadRoles,
-        ["models.create.prepare"] = ModelWriteRoles,
-        ["models.create.commit"] = ModelWriteRoles,
-        ["orders.create.prepare"] = WriteRoles,
-        ["orders.create.commit"] = WriteRoles
+
+        ["models.search"] = ReadRoles,
+        ["models.get"] = ReadRoles,
+        ["models.attributes.list"] = ReadRoles,
+        ["models.price.analyze"] = ReadRoles,
+        ["models.create.prepare"] = WriteRoles,
+        ["models.create.commit"] = WriteRoles
     };
 
     public void EnsureReadAllowed(string toolName, ExecutionContext context)

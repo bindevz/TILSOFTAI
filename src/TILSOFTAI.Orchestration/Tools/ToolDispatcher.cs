@@ -140,7 +140,7 @@ public sealed class ToolDispatcher
 
     private async Task<ToolDispatchResult> HandleModelsSearchAsync(ModelSearchIntent intent, ExecutionContext context, CancellationToken cancellationToken)
     {
-        var result = await _modelsService.SearchAsync(intent.Category, intent.Name, intent.Page, intent.PageSize, context, cancellationToken);
+        var result = await _modelsService.SearchAsync(context.TenantId, intent.RangeName, intent.ModelCode, intent.ModelName, intent.Season, intent.Collection, intent.Page, intent.PageSize, context, cancellationToken);
         var payload = new
         {
             result.TotalCount,
@@ -148,10 +148,12 @@ public sealed class ToolDispatcher
             result.PageSize,
             Models = result.Items.Select(m => new
             {
-                m.Id,
-                m.Name,
-                m.Category,
-                m.BasePrice
+                m.ModelID,
+                m.ModelUD,
+                m.ModelNM,
+                m.Season,
+                m.RangeName,
+                m.Collection
             })
         };
         return CreateResult(intent, ToolExecutionResult.CreateSuccess("models.search executed", payload));
@@ -164,10 +166,11 @@ public sealed class ToolDispatcher
 
         var payload = new
         {
-            model.Id,
-            model.Name,
-            model.Category,
-            model.BasePrice,
+            model.ModelID,
+            model.ModelUD,
+            model.ModelNM,
+            model.Season,
+            model.RangeName,
             Attributes = model.Attributes.Select(a => new { a.Name, a.Value })
         };
         return CreateResult(intent, ToolExecutionResult.CreateSuccess("models.get executed", payload));
@@ -203,10 +206,9 @@ public sealed class ToolDispatcher
         var created = await _modelsService.CommitCreateAsync(intent.ConfirmationId, context, cancellationToken);
         var payload = new
         {
-            created.Id,
-            created.Name,
-            created.Category,
-            created.BasePrice
+            created.ModelID,
+            created.ModelUD,
+            created.ModelNM
         };
         return CreateResult(intent, ToolExecutionResult.CreateSuccess("models.create.commit executed", payload));
     }

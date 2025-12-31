@@ -22,7 +22,7 @@ public sealed record OrderSummaryIntent(
 
 public sealed record UpdateEmailIntent(Guid? CustomerId, string? Email, string? ConfirmationId);
 
-public sealed record ModelSearchIntent(string? Category, string? Name, int Page, int PageSize);
+public sealed record ModelSearchIntent(string? RangeName, string? ModelCode, string? ModelName, string? Season, string? Collection, int Page, int PageSize);
 public sealed record ModelGetIntent(Guid ModelId);
 public sealed record ModelListAttributesIntent(Guid ModelId);
 public sealed record ModelPriceAnalyzeIntent(Guid ModelId);

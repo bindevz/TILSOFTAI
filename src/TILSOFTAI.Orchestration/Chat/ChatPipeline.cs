@@ -107,6 +107,16 @@ public sealed class ChatPipeline
             }
         }
 
+        // If this looks like an ERP/business question (modules selected) but no tools are
+        // actually exposed, do not let the model hallucinate tool calls. Return a clear
+        // feature-not-available response instead.
+        var exposedFunctionCount = kernel.Plugins.SelectMany(p => p).Count();
+        if (modules.Count > 0 && exposedFunctionCount == 0)
+        {
+            var fallback = "Hiện tại tôi chưa được cập nhật tính năng này! Vui lòng liên hệ quản trị hệ thống để kích hoạt hoặc bổ sung tool phù hợp.";
+            return BuildResponse(request.Model ?? "TILSOFT-AI", fallback + " __DONE__", incomingMessages);
+        }
+
         // 4) governance filter: chọn 1 trong 2 dòng dưới tùy interface bạn implement
         // Nếu CommitGuardFilter : IAutoFunctionInvocationFilter
         kernel.AutoFunctionInvocationFilters.Add(_commitGuard);
@@ -164,7 +174,8 @@ public sealed class ChatPipeline
 
         Quy tắc công cụ (tools/functions):
         - Nếu yêu cầu CẦN dữ liệu nội bộ (giá, tồn kho, đơn hàng, khách hàng, model, doanh số...) thì PHẢI gọi tools để lấy evidence.
-        - Nếu KHÔNG có tool phù hợp hoặc câu hỏi KHÔNG cần dữ liệu nội bộ, bạn được trả lời tự nhiên như một chatbot thông thường.
+        - Nếu câu hỏi là nghiệp vụ ERP và CẦN dữ liệu nội bộ nhưng hệ thống CHƯA có tool phù hợp, hãy trả lời đúng mẫu: "Hiện tại tôi chưa được cập nhật tính năng này!" (có thể kèm gợi ý liên hệ quản trị hệ thống).
+        - Nếu câu hỏi KHÔNG cần dữ liệu nội bộ (chào hỏi, giải thích khái niệm, hướng dẫn chung...), bạn được trả lời tự nhiên như một chatbot thông thường.
         - Tuyệt đối không bịa dữ liệu nội bộ khi chưa có evidence từ tool.
         - Chỉ được gọi các tools có trong danh sách hệ thống cung cấp. Tuyệt đối không tự bịa tool (ví dụ: functions.prepare).
         - Thao tác ghi (create/update/commit) phải theo 2 bước: prepare -> yêu cầu xác nhận -> commit.
