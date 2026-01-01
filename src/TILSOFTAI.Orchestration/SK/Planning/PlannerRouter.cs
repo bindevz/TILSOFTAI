@@ -14,7 +14,11 @@ public sealed class PlannerRouter
         {
             "phân tích", "so sánh", "xu hướng", "báo cáo", "report", "trend",
             "tổng hợp", "đánh giá", "đề xuất", "nguyên nhân", "root cause",
-            "theo thị trường", "theo khách hàng", "lợi nhuận"
+            "theo thị trường", "theo khách hàng", "lợi nhuận",
+
+            // Multi-step business workflows (prepare -> confirm -> commit)
+            "tạo", "thêm", "lập", "đăng ký", "cập nhật", "sửa", "xoá", "xóa",
+            "create", "add", "update", "delete", "commit", "xác nhận", "confirm"
         };
 
         var score = 0;

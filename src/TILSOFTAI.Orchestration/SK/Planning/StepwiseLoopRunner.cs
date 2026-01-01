@@ -6,7 +6,7 @@ namespace TILSOFTAI.Orchestration.SK.Planning
 {
     public sealed class StepwiseLoopRunner
     {
-        // Circuit breaker thresholds
+        // Circuit breaker thresholds (assistant-level, tool-level guards are handled by AutoInvocationCircuitBreakerFilter)
         private const int MaxConsecutiveFailures = 3;
         private const int MaxConsecutiveEmptyAssistant = 2;
         private const int MaxRepeatSameAssistant = 2;
@@ -49,7 +49,7 @@ namespace TILSOFTAI.Orchestration.SK.Planning
                         consecutiveEmptyAssistant++;
                         if (consecutiveEmptyAssistant >= MaxConsecutiveEmptyAssistant)
                         {
-                            return "Planner stopped: assistant returned empty content repeatedly (no progress).";
+                            return "Tôi đã thực hiện các bước cần thiết nhưng chưa thể tổng hợp câu trả lời. Vui lòng thử lại hoặc cung cấp thêm tiêu chí.";
                         }
 
                         // Không coi là exception, nhưng là 1 dạng “no progress”
@@ -64,7 +64,7 @@ namespace TILSOFTAI.Orchestration.SK.Planning
                         repeatSameAssistant++;
                         if (repeatSameAssistant >= MaxRepeatSameAssistant)
                         {
-                            return "Planner stopped: assistant repeated the same output (no progress).";
+                            return "Tôi đang bị lặp trong quá trình xử lý. Vui lòng nêu rõ hơn yêu cầu hoặc cung cấp thêm tiêu chí.";
                         }
                     }
                     else
@@ -75,15 +75,10 @@ namespace TILSOFTAI.Orchestration.SK.Planning
 
                     history.AddAssistantMessage(content);
 
-                    // DONE condition (giữ logic hiện có của bạn)
-                    if (content.Contains("__DONE__", StringComparison.OrdinalIgnoreCase))
-                    {
-                        // Tùy bạn: có thể parse phần answer sau token DONE
-                        return content;
-                    }
-
-                    // Nếu qua được 1 vòng bình thường thì reset failure counter
-                    consecutiveFailures = 0;
+                    // New stop condition: first non-empty assistant output.
+                    // Tool calling (if needed) is handled internally by SK when FunctionChoiceBehavior.Auto is enabled.
+                    // Multi-turn business workflows (prepare -> confirm -> commit) are handled across user turns.
+                    return content;
                 }
                 catch (OperationCanceledException)
                 {
@@ -94,7 +89,7 @@ namespace TILSOFTAI.Orchestration.SK.Planning
                     consecutiveFailures++;
                     if (consecutiveFailures >= MaxConsecutiveFailures)
                     {
-                        return $"Planner stopped: too many consecutive failures ({MaxConsecutiveFailures}). Last error: {ex.Message}";
+                        return "Tạm thời tôi không thể xử lý yêu cầu do lỗi hệ thống. Vui lòng thử lại.";
                     }
 
                     // Khuyến nghị: không add error vào history như assistant message,
@@ -103,7 +98,7 @@ namespace TILSOFTAI.Orchestration.SK.Planning
                 }
             }
 
-            return "Planner stopped: reached max iterations.";
+            return "Hệ thống đã thực thi các bước cần thiết nhưng chưa thể tổng hợp câu trả lời. Vui lòng thử lại hoặc cung cấp thêm tiêu chí.";
         }
     }
 }

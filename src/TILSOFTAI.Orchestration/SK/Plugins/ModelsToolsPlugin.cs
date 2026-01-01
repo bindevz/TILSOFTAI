@@ -1,5 +1,6 @@
 ﻿using System.ComponentModel;
 using Microsoft.SemanticKernel;
+using System.Text.Json;
 using TILSOFTAI.Orchestration.SK;
 
 namespace TILSOFTAI.Orchestration.SK.Plugins;
@@ -15,11 +16,31 @@ public sealed class ModelsToolsPlugin
 
     [KernelFunction("count")]
     [Description("Đếm tổng số model hiện có trên hệ thống. Dùng khi user hỏi có bao nhiêu model/mẫu.")]
-    public Task<object> CountAsync(
+    public async Task<object> CountAsync(
         string? category = null,
         string? name = null,
         CancellationToken ct = default)
-        => _invoker.ExecuteAsync("models.search", new { category, name, page = 1, pageSize = 1 }, ct);
+    {
+        // Return a minimal payload so the model can reliably produce a final answer.
+        var raw = await _invoker.ExecuteAsync("models.search", new { category, name, page = 1, pageSize = 1 }, ct);
+
+        // raw = { tool, normalizedIntent, message, data }
+        // data is expected to contain totalCount
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(raw, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        if (doc.RootElement.TryGetProperty("data", out var data) &&
+            (data.TryGetProperty("totalCount", out var total) || data.TryGetProperty("TotalCount", out total)) &&
+            (total.ValueKind == JsonValueKind.Number || total.ValueKind == JsonValueKind.String))
+        {
+            var n = total.ValueKind == JsonValueKind.Number
+                ? total.GetInt32()
+                : int.TryParse(total.GetString(), out var parsed) ? parsed : 0;
+
+            return new { totalCount = n };
+        }
+
+        // Fallback: return the original evidence if shape changes
+        return raw;
+    }
 
     [KernelFunction("search")]
     [Description("Tìm model theo category/name để lấy modelId. Kết quả có TotalCount để biết tổng số model trong hệ thống hoặc theo bộ lọc.")]

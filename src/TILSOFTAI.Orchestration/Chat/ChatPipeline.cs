@@ -21,6 +21,7 @@ public sealed class ChatPipeline
     private readonly ToolRegistry _toolRegistry;
     private readonly ToolDispatcher _toolDispatcher;
     private readonly CommitGuardFilter _commitGuard;
+    private readonly AutoInvocationCircuitBreakerFilter _circuitBreaker;
     private readonly TokenBudget _tokenBudget;
     private readonly IAuditLogger _auditLogger;
     private readonly PlannerRouter _plannerRouter;
@@ -39,6 +40,7 @@ public sealed class ChatPipeline
         ToolRegistry toolRegistry,
         ToolDispatcher toolDispatcher,
         CommitGuardFilter commitGuard,
+        AutoInvocationCircuitBreakerFilter circuitBreaker,
         TokenBudget tokenBudget,
         IAuditLogger auditLogger,
         PlannerRouter plannerRouter,
@@ -52,6 +54,7 @@ public sealed class ChatPipeline
         _toolRegistry = toolRegistry;
         _toolDispatcher = toolDispatcher;
         _commitGuard = commitGuard;
+        _circuitBreaker = circuitBreaker;
         _tokenBudget = tokenBudget;
         _auditLogger = auditLogger;
         _plannerRouter = plannerRouter;
@@ -86,8 +89,12 @@ public sealed class ChatPipeline
             !string.IsNullOrWhiteSpace(m.Content)).Content;
 
         // 1) set context for plugins/filters
+        _ctxAccessor.CircuitBreakerTripped = false;
+        _ctxAccessor.CircuitBreakerReason = null;
         _ctxAccessor.Context = context;
         _ctxAccessor.ConfirmedConfirmationId = TryExtractConfirmationId(lastUserMessage);
+        _ctxAccessor.AutoInvokeCount = 0;
+        _ctxAccessor.AutoInvokeSignatureCounts.Clear();
 
         // 2) build kernel
         var kernel = _kernelFactory.CreateKernel(request.Model);
@@ -114,11 +121,12 @@ public sealed class ChatPipeline
         if (modules.Count > 0 && exposedFunctionCount == 0)
         {
             var fallback = "Hiện tại tôi chưa được cập nhật tính năng này! Vui lòng liên hệ quản trị hệ thống để kích hoạt hoặc bổ sung tool phù hợp.";
-            return BuildResponse(request.Model ?? "TILSOFT-AI", fallback + " __DONE__", incomingMessages);
+            return BuildResponse(request.Model ?? "TILSOFT-AI", fallback, incomingMessages);
         }
 
         // 4) governance filter: chọn 1 trong 2 dòng dưới tùy interface bạn implement
         // Nếu CommitGuardFilter : IAutoFunctionInvocationFilter
+        kernel.AutoFunctionInvocationFilters.Add(_circuitBreaker);
         kernel.AutoFunctionInvocationFilters.Add(_commitGuard);
         // Nếu CommitGuardFilter : IFunctionInvocationFilter thì dùng:
         // kernel.FunctionInvocationFilters.Add(_commitGuard);
@@ -147,14 +155,21 @@ public sealed class ChatPipeline
             }
             else
             {
-                var chat = kernel.GetRequiredService<IChatCompletionService>();
-                var settings = new OpenAIPromptExecutionSettings
-                {
-                    FunctionChoiceBehavior = FunctionChoiceBehavior.Auto()
-                };
+                content = await GetAssistantAnswerAsync(request.Model, kernel, history, cancellationToken);
+            }
 
-                var msg = await chat.GetChatMessageContentAsync(history, settings, kernel, cancellationToken);
-                content = (msg.Content ?? string.Empty).Replace("__DONE__", "", StringComparison.OrdinalIgnoreCase).Trim();
+            // Defensive: if some path returns empty content, force a no-tools synthesis pass
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                content = await SynthesizeWithoutToolsAsync(request.Model, history, cancellationToken);
+            }
+
+            // thấy marker / flag thì xóa content để ép synthesis
+            if (_ctxAccessor.CircuitBreakerTripped ||
+                content.StartsWith("CIRCUIT_BREAKER", StringComparison.OrdinalIgnoreCase) ||
+                content.Contains("\"circuit_breaker\"", StringComparison.OrdinalIgnoreCase))
+            {
+                content = string.Empty;
             }
         }
         catch
@@ -180,11 +195,48 @@ public sealed class ChatPipeline
         - Chỉ được gọi các tools có trong danh sách hệ thống cung cấp. Tuyệt đối không tự bịa tool (ví dụ: functions.prepare).
         - Thao tác ghi (create/update/commit) phải theo 2 bước: prepare -> yêu cầu xác nhận -> commit.
         - Người dùng xác nhận bằng: XÁC NHẬN <confirmation_id>.
-
-        Kết thúc:
-        - Nếu bạn đã hoàn thành câu trả lời cuối cùng, hãy kết thúc bằng token: __DONE__.
-        - Nếu còn cần gọi tools hoặc cần hỏi thêm, KHÔNG dùng __DONE__.
         """;
+
+    private async Task<string> GetAssistantAnswerAsync(
+        string? requestedModel,
+        Kernel kernel,
+        ChatHistory history,
+        CancellationToken cancellationToken)
+    {
+        var chat = kernel.GetRequiredService<IChatCompletionService>();
+        var settings = new OpenAIPromptExecutionSettings
+        {
+            FunctionChoiceBehavior = FunctionChoiceBehavior.Auto()
+        };
+
+        var msg = await chat.GetChatMessageContentAsync(history, settings, kernel, cancellationToken);
+        var content = (msg.Content ?? string.Empty).Trim();
+
+        // If the model executed tools but returned empty content, do a forced synthesis
+        // pass with no tools exposed. This prevents empty assistant outputs from reaching
+        // the client and avoids relying on any sentinel tokens.
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            content = await SynthesizeWithoutToolsAsync(requestedModel, history, cancellationToken);
+        }
+
+        return content;
+    }
+
+    private async Task<string> SynthesizeWithoutToolsAsync(
+        string? requestedModel,
+        ChatHistory history,
+        CancellationToken cancellationToken)
+    {
+        // Add a short instruction to produce a final answer based on evidence already in history.
+        history.AddSystemMessage("\"Bạn đã có đủ kết quả từ tools. Hãy trả lời trực tiếp, ngắn gọn, dựa trên evidence trong hội thoại. \" +\r\n  \"KHÔNG gọi tool. Không nhắc tới thông báo kỹ thuật nội bộ (circuit breaker / guardrails).\"");
+
+        // New kernel without plugins => no tools can be called.
+        var kernel2 = _kernelFactory.CreateKernel(requestedModel);
+        var chat2 = kernel2.GetRequiredService<IChatCompletionService>();
+        var msg2 = await chat2.GetChatMessageContentAsync(history, new OpenAIPromptExecutionSettings(), kernel2, cancellationToken);
+        return (msg2.Content ?? string.Empty).Trim();
+    }
 
     private static string? TryExtractConfirmationId(string text)
     {

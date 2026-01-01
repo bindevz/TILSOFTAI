@@ -19,6 +19,20 @@ public sealed class ModelRepository : IModelRepository
 
     public async Task<PagedResult<Model>> SearchAsync(string tenantId, string? rangeName, string? modelCode, string? modelName, string? season, string? collection, int page, int size, CancellationToken cancellationToken)
     {
+        //try
+        //{
+        //    var connString = _dbContext.Database.GetConnectionString();
+        //    await using var conn = new SqlConnection(connString);
+        //    await conn.OpenAsync(cancellationToken);
+
+        //    if (conn.State != ConnectionState.Open)
+        //        await conn.OpenAsync(cancellationToken);
+        //}
+        //catch (Exception ex)
+        //{
+        //    Console.Write(ex.Message);
+        //    throw;
+        //}
         var connString = _dbContext.Database.GetConnectionString();
         await using var conn = new SqlConnection(connString);
         await conn.OpenAsync(cancellationToken);
@@ -46,20 +60,35 @@ public sealed class ModelRepository : IModelRepository
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
 
 
-        // Result set 1: Models
+        // Cache ordinals một lần
+        var ordModelId = reader.GetOrdinal("ModelID");
+        var ordModelUd = reader.GetOrdinal("ModelUD");
+        var ordModelNm = reader.GetOrdinal("ModelNM");
+        var ordSeason = reader.GetOrdinal("Season");
+        var ordCollection = reader.GetOrdinal("Collection");
+        var ordRangeName = reader.GetOrdinal("RangeName");
+
+        static string GetStringOrEmpty(SqlDataReader r, int ord)
+            => r.IsDBNull(ord) ? string.Empty : r.GetString(ord);
+
+        static int GetInt32Safe(SqlDataReader r, int ord)
+        {
+            if (r.IsDBNull(ord)) return 0;
+
+            // Nếu DB trả bigint/decimal thì Convert sẽ “chịu” tốt hơn GetInt32 trực tiếp
+            return Convert.ToInt32(r.GetValue(ord));
+        }
+
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new Model
             {
-                //Id = reader.GetGuid(reader.GetOrdinal("Id")),
-                //TenantId = reader.GetString(reader.GetOrdinal("TenantId")),
-                ModelID = reader.GetInt32(reader.GetOrdinal("ModelID")),
-                ModelUD = reader.GetString(reader.GetOrdinal("ModelUD")),
-                ModelNM = reader.GetString(reader.GetOrdinal("ModelNM")),
-                Season = reader.GetString(reader.GetOrdinal("Season")),
-                Collection = reader.GetString(reader.GetOrdinal("Collection")),
-                RangeName = reader.GetString(reader.GetOrdinal("RangeName"))
-                // Attributes sẽ load ở SP khác hoặc result set khác 
+                ModelID = GetInt32Safe(reader, ordModelId),
+                ModelUD = GetStringOrEmpty(reader, ordModelUd),
+                ModelNM = GetStringOrEmpty(reader, ordModelNm),
+                Season = GetStringOrEmpty(reader, ordSeason),
+                Collection = GetStringOrEmpty(reader, ordCollection),
+                RangeName = GetStringOrEmpty(reader, ordRangeName)
             });
         }
 
@@ -79,35 +108,6 @@ public sealed class ModelRepository : IModelRepository
             PageNumber = page,
             PageSize = size
         };
-        //var scoped = _dbContext.ProductModels
-        //    .AsNoTracking()
-        //    .Where(m => m.TenantId == tenantId);
-
-        //if (!string.IsNullOrWhiteSpace(category))
-        //{
-        //    scoped = scoped.Where(m => m.Category == category);
-        //}
-
-        //if (!string.IsNullOrWhiteSpace(name))
-        //{
-        //    scoped = scoped.Where(m => m.Name.Contains(name));
-        //}
-
-        //var total = await scoped.CountAsync(cancellationToken);
-        //var items = await scoped
-        //    .OrderBy(m => m.Name)
-        //    .Skip((page - 1) * size)
-        //    .Take(size)
-        //    .Include(m => m.Attributes)
-        //    .ToListAsync(cancellationToken);
-
-        //return new PagedResult<ProductModel>
-        //{
-        //    Items = items,
-        //    TotalCount = total,
-        //    PageNumber = page,
-        //    PageSize = size
-        //};
     }
 
     public Task<Model?> GetAsync(string tenantId, Guid id, CancellationToken cancellationToken)
