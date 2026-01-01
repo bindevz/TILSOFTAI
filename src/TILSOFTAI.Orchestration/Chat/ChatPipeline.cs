@@ -143,7 +143,7 @@ public sealed class ChatPipeline
         {
             if (useLoop)
             {
-                content = await _stepwiseLoopRunner.RunAsync(kernel, history, maxIterations: 8, ct: cancellationToken);
+                content = await _stepwiseLoopRunner.RunAsync(kernel, history, maxIterations: 8, cancellationToken);
             }
             else
             {

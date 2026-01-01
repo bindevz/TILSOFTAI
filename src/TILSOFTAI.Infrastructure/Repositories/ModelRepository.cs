@@ -19,8 +19,13 @@ public sealed class ModelRepository : IModelRepository
 
     public async Task<PagedResult<Model>> SearchAsync(string tenantId, string? rangeName, string? modelCode, string? modelName, string? season, string? collection, int page, int size, CancellationToken cancellationToken)
     {
-        await using var conn = _dbContext.Database.GetDbConnection();
-        if (conn.State != ConnectionState.Open) await conn.OpenAsync(cancellationToken);
+        var connString = _dbContext.Database.GetConnectionString();
+        await using var conn = new SqlConnection(connString);
+        await conn.OpenAsync(cancellationToken);
+
+        if (conn.State != ConnectionState.Open)
+            await conn.OpenAsync(cancellationToken);
+
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = "dbo.TILSOFTAI_sp_models_search";
@@ -74,8 +79,6 @@ public sealed class ModelRepository : IModelRepository
             PageNumber = page,
             PageSize = size
         };
-
-
         //var scoped = _dbContext.ProductModels
         //    .AsNoTracking()
         //    .Where(m => m.TenantId == tenantId);
