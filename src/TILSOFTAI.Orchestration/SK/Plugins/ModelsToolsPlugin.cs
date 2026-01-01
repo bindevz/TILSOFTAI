@@ -15,17 +15,20 @@ public sealed class ModelsToolsPlugin
     public ModelsToolsPlugin(ToolInvoker invoker) => _invoker = invoker;
 
     [KernelFunction("count")]
-    [Description("Đếm tổng số model hiện có trên hệ thống. Dùng khi user hỏi có bao nhiêu model/mẫu.")]
+    [Description("Đếm tổng số model. Có thể lọc theo season (vd: '24/25' hoặc 2025/2025).")]
     public async Task<object> CountAsync(
-        string? category = null,
-        string? name = null,
+        string? rangeName = null,
+        string? modelCode = null,
+        string? modelName = null,
+        string? season = null,
+        string? collection = null,
         CancellationToken ct = default)
     {
-        // Return a minimal payload so the model can reliably produce a final answer.
-        var raw = await _invoker.ExecuteAsync("models.search", new { category, name, page = 1, pageSize = 1 }, ct);
+        var raw = await _invoker.ExecuteAsync(
+            "models.search",
+            new { rangeName, modelCode, modelName, season, collection, page = 1, pageSize = 1 },
+            ct);
 
-        // raw = { tool, normalizedIntent, message, data }
-        // data is expected to contain totalCount
         using var doc = JsonDocument.Parse(JsonSerializer.Serialize(raw, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
         if (doc.RootElement.TryGetProperty("data", out var data) &&
             (data.TryGetProperty("totalCount", out var total) || data.TryGetProperty("TotalCount", out total)) &&
@@ -35,22 +38,25 @@ public sealed class ModelsToolsPlugin
                 ? total.GetInt32()
                 : int.TryParse(total.GetString(), out var parsed) ? parsed : 0;
 
-            return new { totalCount = n };
+            return new { totalCount = n, season };
         }
 
-        // Fallback: return the original evidence if shape changes
         return raw;
     }
 
+
     [KernelFunction("search")]
-    [Description("Tìm model theo category/name để lấy modelId. Kết quả có TotalCount để biết tổng số model trong hệ thống hoặc theo bộ lọc.")]
+    [Description("Tìm model theo các bộ lọc. Dùng season dạng '24/25' hoặc '2024/2025'. Kết quả có TotalCount.")]
     public Task<object> SearchAsync(
-        string? category = null,
-        string? name = null,
+        string? rangeName = null,
+        string? modelCode = null,
+        string? modelName = null,
+        string? season = null,
+        string? collection = null,
         int page = 1,
         int pageSize = 20,
         CancellationToken ct = default)
-        => _invoker.ExecuteAsync("models.search", new { category, name, page, pageSize }, ct);
+    => _invoker.ExecuteAsync("models.search", new { rangeName, modelCode, modelName, season, collection, page, pageSize }, ct);
 
     [KernelFunction("get")]
     [Description("Lấy chi tiết model theo modelId.")]

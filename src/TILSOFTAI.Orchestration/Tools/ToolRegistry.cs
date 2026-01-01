@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using TILSOFTAI.Orchestration.Tools.ToolSchemas;
 
 namespace TILSOFTAI.Orchestration.Tools;
@@ -30,7 +30,18 @@ public sealed class ToolRegistry
                 Name: "models.search",
                 Validator: args => ModelsSchemas.ValidateSearch(args).ToObject(),
                 RequiresWrite: false,
-                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "category", "name", "page", "pageSize" }),
+                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    // canonical fields (khuyến nghị dùng)
+                    "rangeName", "modelCode", "modelName", "season", "collection",
+
+                    // paging
+                    "page", "pageSize",
+
+                    // backward-compatible aliases (nếu trước đây LLM hay dùng)
+                    "category", "name"
+                }),
+
             ["models.get"] = new(
                 Name: "models.get",
                 Validator: args => ModelsSchemas.ValidateGet(args).ToObject(),

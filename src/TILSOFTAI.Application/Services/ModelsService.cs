@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text.Json;
 using TILSOFTAI.Application.Validators;
 using TILSOFTAI.Domain.Entities;
@@ -26,6 +26,7 @@ public sealed class ModelsService
     public Task<PagedResult<Model>> SearchAsync(string tenantId, string? rangeName, string? modelCode, string? modelName, string? season, string? collection, int page, int size, ExecutionContext context, CancellationToken cancellationToken)
     {
         BusinessValidators.ValidatePage(page, size);
+        season = NormalizeSeason(season);
         return _modelRepository.SearchAsync(context.TenantId, rangeName, modelCode, modelName, season, collection, page, size, cancellationToken);
     }
 
@@ -136,4 +137,69 @@ public sealed class ModelsService
             throw new InvalidOperationException("Invalid confirmation payload.");
         }
     }
+
+    private static string? NormalizeSeason(string? season)
+    {
+        if (string.IsNullOrWhiteSpace(season)) return null;
+
+        season = season.Trim();
+
+        // 1) Full form: 2024/2025 or 2024-2025 -> keep canonical "2024/2025"
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(
+                season,
+                @"\b(20\d{2})\s*[/\-]\s*(20\d{2})\b");
+
+            if (m.Success)
+            {
+                var y1 = int.Parse(m.Groups[1].Value);
+                var y2 = int.Parse(m.Groups[2].Value);
+
+                // optional: enforce contiguous season
+                // if (y2 != y1 + 1) ... (either correct or keep as-is)
+
+                return $"{y1}/{y2}";
+            }
+        }
+
+        // 2) Short form: 24/25 or 24-25 -> expand to 2024/2025
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(
+                season,
+                @"\b(\d{2})\s*[/\-]\s*(\d{2})\b");
+
+            if (m.Success)
+            {
+                var a = int.Parse(m.Groups[1].Value); // 24
+                var b = int.Parse(m.Groups[2].Value); // 25
+
+                // Rule: map 00-99 -> 2000-2099 by default
+                var y1 = 2000 + a;
+
+                // Prefer contiguous season (y2 = y1 + 1). If user typed 24/26, you can decide policy:
+                // - strict: force y2 = y1 + 1
+                // - permissive: respect provided b (2000 + b) but adjust if wraparound
+                // I'll implement "prefer contiguous" when b == (a+1)%100, else respect b.
+                int y2;
+                if (b == ((a + 1) % 100))
+                {
+                    y2 = y1 + 1;
+                }
+                else
+                {
+                    // respect b, handle wrap-around (e.g., 99/00 => 2099/2100 if you ever need)
+                    // in 2000s-only assumption, 99/00 is unlikely; you can still support it:
+                    var baseCentury = 2000;
+                    y2 = baseCentury + b;
+                    if (b < a) y2 += 100; // 99/00 => 2099/2100
+                }
+
+                return $"{y1}/{y2}";
+            }
+        }
+
+        // 3) If cannot parse, return as-is (or null if you prefer)
+        return season;
+    }
+
 }

@@ -6,9 +6,9 @@ public static class ModelsSchemas
 {
     public static ValidationResult<ModelSearchIntent> ValidateSearch(JsonElement args)
     {
-        var rangeName = GetString(args, "rangeName");
+        var rangeName = GetString(args, "rangeName") ?? GetString(args, "category");
         var modelCode = GetString(args, "modelCode");
-        var modelName = GetString(args, "modelName");
+        var modelName = GetString(args, "modelName") ?? GetString(args, "name");
         var season = GetString(args, "season");
         var collection = GetString(args, "collection");
         var page = RequireInt(args, "page");
