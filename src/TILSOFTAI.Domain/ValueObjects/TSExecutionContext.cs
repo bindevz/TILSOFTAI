@@ -1,6 +1,6 @@
 namespace TILSOFTAI.Domain.ValueObjects;
 
-public sealed class ExecutionContext
+public sealed class TSExecutionContext
 {
     public required string UserId { get; init; }
     public required string TenantId { get; init; }

@@ -1,7 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using TILSOFTAI.Domain.Interfaces;
-using ExecutionContext = TILSOFTAI.Domain.ValueObjects.ExecutionContext;
+using TSExecutionContext = TILSOFTAI.Domain.ValueObjects.TSExecutionContext;
 
 namespace TILSOFTAI.Infrastructure.Observability;
 
@@ -19,21 +19,21 @@ public sealed class AuditLogger : IAuditLogger
         _logger = logger;
     }
 
-    public Task LogUserInputAsync(ExecutionContext context, string input, CancellationToken cancellationToken)
+    public Task LogUserInputAsync(TSExecutionContext context, string input, CancellationToken cancellationToken)
     {
         _logger.LogInformation("audit:user_input tenant={TenantId} user={UserId} correlation={CorrelationId} payload={Payload}",
             context.TenantId, context.UserId, context.CorrelationId, input);
         return Task.CompletedTask;
     }
 
-    public Task LogAiDecisionAsync(ExecutionContext context, string aiOutput, CancellationToken cancellationToken)
+    public Task LogAiDecisionAsync(TSExecutionContext context, string aiOutput, CancellationToken cancellationToken)
     {
         _logger.LogInformation("audit:ai_decision tenant={TenantId} user={UserId} correlation={CorrelationId} payload={Payload}",
             context.TenantId, context.UserId, context.CorrelationId, aiOutput);
         return Task.CompletedTask;
     }
 
-    public Task LogToolExecutionAsync(ExecutionContext context, string toolName, object arguments, object result, CancellationToken cancellationToken)
+    public Task LogToolExecutionAsync(TSExecutionContext context, string toolName, object arguments, object result, CancellationToken cancellationToken)
     {
         var serializedArgs = JsonSerializer.Serialize(arguments, SerializerOptions);
         var serializedResult = JsonSerializer.Serialize(result, SerializerOptions);

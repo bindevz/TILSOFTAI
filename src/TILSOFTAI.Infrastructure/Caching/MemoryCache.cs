@@ -1,8 +1,9 @@
 using Microsoft.Extensions.Caching.Memory;
+using TILSOFTAI.Domain.Interfaces;
 
 namespace TILSOFTAI.Infrastructure.Caching;
 
-public sealed class AppMemoryCache
+public sealed class AppMemoryCache : IAppCache
 {
     private readonly IMemoryCache _cache;
 

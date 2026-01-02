@@ -10,7 +10,7 @@ using TILSOFTAI.Orchestration.SK.Governance;
 using TILSOFTAI.Orchestration.SK.Planning;
 using TILSOFTAI.Orchestration.SK.Plugins;
 using TILSOFTAI.Orchestration.Tools;
-using ExecutionContext = TILSOFTAI.Domain.ValueObjects.ExecutionContext;
+using TSExecutionContext = TILSOFTAI.Domain.ValueObjects.TSExecutionContext;
 
 namespace TILSOFTAI.Orchestration.Chat;
 
@@ -64,7 +64,7 @@ public sealed class ChatPipeline
         _moduleRouter = moduleRouter;
     }
 
-    public async Task<ChatCompletionResponse> HandleAsync(ChatCompletionRequest request, ExecutionContext context, CancellationToken cancellationToken)
+    public async Task<ChatCompletionResponse> HandleAsync(ChatCompletionRequest request, TSExecutionContext context, CancellationToken cancellationToken)
     {
         var serializedRequest = JsonSerializer.Serialize(request, _serializerOptions);
 

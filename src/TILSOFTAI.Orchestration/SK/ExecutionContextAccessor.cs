@@ -1,10 +1,10 @@
-﻿using ExecutionContext = TILSOFTAI.Domain.ValueObjects.ExecutionContext;
+﻿using TSExecutionContext = TILSOFTAI.Domain.ValueObjects.TSExecutionContext;
 
 namespace TILSOFTAI.Orchestration.SK;
 
 public sealed class ExecutionContextAccessor
 {
-    public ExecutionContext Context { get; set; }
+    public TSExecutionContext Context { get; set; }
     public string? ConfirmedConfirmationId { get; set; } // parse từ user message
 
     // Per-request circuit breaker state for auto tool invocation

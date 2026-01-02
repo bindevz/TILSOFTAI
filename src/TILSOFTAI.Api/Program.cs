@@ -32,6 +32,7 @@ builder.Services.AddScoped<IUnitOfWork>(provider => provider.GetRequiredService<
 
 builder.Services.AddSingleton<RbacService>();
 builder.Services.AddSingleton<AppMemoryCache>();
+builder.Services.AddSingleton<IAppCache>(sp => sp.GetRequiredService<AppMemoryCache>());
 builder.Services.AddSingleton<ToolRegistry>();
 builder.Services.AddScoped<ToolDispatcher>();
 builder.Services.AddSingleton<TokenBudget>();
@@ -71,9 +72,9 @@ builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.Governance.AutoInvocationC
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.Planning.PlannerRouter>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.Planning.StepwiseLoopRunner>();
 
-//Filter Catalog
-builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.FiltersCatalog.IFilterCatalogService,
-                              TILSOFTAI.Orchestration.Tools.FiltersCatalog.FilterCatalogService>();
+// Filter Catalog (Phase 2: includeValues reads DB, so keep it scoped)
+builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.FiltersCatalog.IFilterCatalogService,
+                          TILSOFTAI.Orchestration.Tools.FiltersCatalog.FilterCatalogService>();
 
 
 builder.Services.Configure<RateLimitOptions>(builder.Configuration.GetSection("RateLimiting"));

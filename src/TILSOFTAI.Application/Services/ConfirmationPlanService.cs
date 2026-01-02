@@ -1,6 +1,6 @@
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Domain.ValueObjects;
-using ExecutionContext = TILSOFTAI.Domain.ValueObjects.ExecutionContext;
+using TSExecutionContext = TILSOFTAI.Domain.ValueObjects.TSExecutionContext;
 
 namespace TILSOFTAI.Application.Services;
 
@@ -14,7 +14,7 @@ public sealed class ConfirmationPlanService
         _store = store;
     }
 
-    public async Task<ConfirmationPlan> CreatePlanAsync(string tool, ExecutionContext context, IReadOnlyDictionary<string, string> data, CancellationToken cancellationToken)
+    public async Task<ConfirmationPlan> CreatePlanAsync(string tool, TSExecutionContext context, IReadOnlyDictionary<string, string> data, CancellationToken cancellationToken)
     {
         var plan = new ConfirmationPlan
         {
@@ -30,7 +30,7 @@ public sealed class ConfirmationPlanService
         return plan;
     }
 
-    public async Task<ConfirmationPlan> ConsumePlanAsync(string confirmationId, string tool, ExecutionContext context, CancellationToken cancellationToken)
+    public async Task<ConfirmationPlan> ConsumePlanAsync(string confirmationId, string tool, TSExecutionContext context, CancellationToken cancellationToken)
     {
         var plan = await _store.GetAsync(confirmationId, cancellationToken);
         if (plan is null)

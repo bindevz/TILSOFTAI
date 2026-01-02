@@ -3,7 +3,7 @@ using TILSOFTAI.Application.Validators;
 using TILSOFTAI.Domain.Entities;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Domain.ValueObjects;
-using ExecutionContext = TILSOFTAI.Domain.ValueObjects.ExecutionContext;
+using TSExecutionContext = TILSOFTAI.Domain.ValueObjects.TSExecutionContext;
 
 namespace TILSOFTAI.Application.Services;
 
@@ -24,7 +24,7 @@ public sealed class CustomersService
         _confirmationPlanService = confirmationPlanService;
     }
 
-    public async Task<PagedResult<Customer>> SearchAsync(string query, int page, int pageSize, ExecutionContext context, CancellationToken cancellationToken)
+    public async Task<PagedResult<Customer>> SearchAsync(string query, int page, int pageSize, TSExecutionContext context, CancellationToken cancellationToken)
     {
         _rbac.EnsureReadAllowed("customers.search", context);
         BusinessValidators.ValidatePage(page, pageSize, maxSize: 50);
@@ -37,7 +37,7 @@ public sealed class CustomersService
         return await _customersRepository.SearchAsync(context.TenantId, query, page, pageSize, cancellationToken);
     }
 
-    public async Task<object> PrepareUpdateEmailAsync(Guid customerId, string newEmail, ExecutionContext context, CancellationToken cancellationToken)
+    public async Task<object> PrepareUpdateEmailAsync(Guid customerId, string newEmail, TSExecutionContext context, CancellationToken cancellationToken)
     {
         _rbac.EnsureWriteAllowed("customers.updateEmail", context);
         BusinessValidators.EnsureWriteAuthorized("customers.updateEmail", context, new[] { "admin", "ops" });
@@ -83,7 +83,7 @@ public sealed class CustomersService
         };
     }
 
-    public async Task<Customer> CommitUpdateEmailAsync(string confirmationId, ExecutionContext context, CancellationToken cancellationToken)
+    public async Task<Customer> CommitUpdateEmailAsync(string confirmationId, TSExecutionContext context, CancellationToken cancellationToken)
     {
         _rbac.EnsureWriteAllowed("customers.updateEmail", context);
         BusinessValidators.EnsureWriteAuthorized("customers.updateEmail", context, new[] { "admin", "ops" });

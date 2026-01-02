@@ -60,9 +60,4 @@ public sealed class ModelsToolsPlugin
     public Task<object> CreateCommitAsync(string confirmationId, CancellationToken ct = default)
         => _invoker.ExecuteAsync("models.create.commit", new { confirmationId }, ct);
 
-    [KernelFunction("filters_catalog")]
-    [Description("Trả về danh sách filters hợp lệ khi gọi models.search/count/stats (keys, aliases, examples). Dùng khi cần biết có thể filter theo gì.")]
-    public Task<object> FiltersCatalogAsync(CancellationToken ct = default)
-    => _invoker.ExecuteAsync("models.filters_catalog", new { }, ct);
-
 }

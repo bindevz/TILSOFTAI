@@ -32,7 +32,7 @@ public sealed class OpenAiChatController : ControllerBase
         return Ok(response);
     }
 
-    private static TILSOFTAI.Domain.ValueObjects.ExecutionContext BuildExecutionContext(HttpContext httpContext)
+    private static TILSOFTAI.Domain.ValueObjects.TSExecutionContext BuildExecutionContext(HttpContext httpContext)
     {
         var tenantId = httpContext.Request.Headers.TryGetValue("X-Tenant-Id", out var tenantHeader) && !string.IsNullOrWhiteSpace(tenantHeader)
             ? tenantHeader.ToString()
@@ -68,7 +68,7 @@ public sealed class OpenAiChatController : ControllerBase
             ? correlationValue
             : httpContext.TraceIdentifier;
 
-        return new TILSOFTAI.Domain.ValueObjects.ExecutionContext
+        return new TILSOFTAI.Domain.ValueObjects.TSExecutionContext
         {
             TenantId = tenantId,
             UserId = userId,
@@ -77,7 +77,7 @@ public sealed class OpenAiChatController : ControllerBase
         };
     }
 
-    //private TILSOFTAI.Domain.ValueObjects.ExecutionContext BuildExecutionContext(HttpContext http)
+    //private TILSOFTAI.Domain.ValueObjects.TSExecutionContext BuildExecutionContext(HttpContext http)
     //{
     //    var userId = http.Request.Headers["X-User-Id"].ToString();
     //    var tenantId = http.Request.Headers["X-Tenant-Id"].ToString();
@@ -103,7 +103,7 @@ public sealed class OpenAiChatController : ControllerBase
     //    if (roles.Count == 0)
     //        roles.Add("viewer"); // hoặc để rỗng và deny
 
-    //    return new TILSOFTAI.Domain.ValueObjects.ExecutionContext(
+    //    return new TILSOFTAI.Domain.ValueObjects.TSExecutionContext(
     //        TenantId: string.IsNullOrWhiteSpace(tenantId) ? "default" : tenantId,
     //        userId: string.IsNullOrWhiteSpace(userId) ? "webui" : userId,
     //        roles: roles.ToArray()

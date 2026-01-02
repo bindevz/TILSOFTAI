@@ -3,7 +3,6 @@ using System.Text.Json;
 using TILSOFTAI.Application.Permissions;
 using TILSOFTAI.Orchestration.Llm;
 using TILSOFTAI.Orchestration.Tools;
-using ExecutionContext = TILSOFTAI.Domain.ValueObjects.ExecutionContext;
 
 namespace TILSOFTAI.Orchestration.SK;
 
@@ -54,7 +53,7 @@ public sealed class ToolInvoker
         }
 
         var invocation = new ToolInvocation(toolName, args);
-        var dispatchResult = await _dispatcher.DispatchAsync(toolName, intent!, _ctx.Context, requiresWrite, ct);
+        var dispatchResult = await _dispatcher.DispatchAsync(toolName, intent!, _ctx.Context, ct);
 
         if (!dispatchResult.Result.Success)
         {

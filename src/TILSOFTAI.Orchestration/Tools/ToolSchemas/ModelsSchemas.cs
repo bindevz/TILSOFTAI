@@ -1,19 +1,23 @@
-﻿using System.Text.Json;
+using System.Text.Json;
+using TILSOFTAI.Orchestration.Tools;
 
 namespace TILSOFTAI.Orchestration.Tools.ToolSchemas;
 
 public static class ModelsSchemas
 {
-    public static ValidationResult<ModelSearchIntent> ValidateSearch(JsonElement args)
+    public static ValidationResult<ModelsSearchIntent> ValidateSearch(JsonElement args)
     {
-        var rangeName = GetString(args, "rangeName") ?? GetString(args, "category");
-        var modelCode = GetString(args, "modelCode");
-        var modelName = GetString(args, "modelName") ?? GetString(args, "name");
-        var season = GetString(args, "season");
-        var collection = GetString(args, "collection");
-        var page = RequireInt(args, "page");
-        var size = RequireInt(args, "pageSize");
-        return ValidationResult<ModelSearchIntent>.Success(new ModelSearchIntent(rangeName, modelCode, modelName, season, collection, page, size));
+        var filters = SchemaParsing.ReadFilters(args);
+        var page = Math.Max(1, SchemaParsing.ReadInt(args, "page", 1));
+        var pageSize = Math.Clamp(SchemaParsing.ReadInt(args, "pageSize", 20), 1, 200);
+
+        return ValidationResult<ModelsSearchIntent>.Success(new ModelsSearchIntent(filters, page, pageSize));
+    }
+
+    public static ValidationResult<ModelsCountIntent> ValidateCount(JsonElement args)
+    {
+        var filters = SchemaParsing.ReadFilters(args);
+        return ValidationResult<ModelsCountIntent>.Success(new ModelsCountIntent(filters));
     }
 
     public static ValidationResult<ModelGetIntent> ValidateGet(JsonElement args)
@@ -39,7 +43,7 @@ public static class ModelsSchemas
         var name = RequireString(args, "name");
         var category = RequireString(args, "category");
         var basePrice = RequireDecimal(args, "basePrice");
-        var attributes = RequireDict(args, "attributes");
+        var attributes = ReadDict(args, "attributes");
         return ValidationResult<ModelCreatePrepareIntent>.Success(new ModelCreatePrepareIntent(name, category, basePrice, attributes));
     }
 
@@ -51,7 +55,7 @@ public static class ModelsSchemas
 
     private static string? GetString(JsonElement element, string prop)
     {
-        if (element.TryGetProperty(prop, out var value) && value.ValueKind == JsonValueKind.String)
+        if (element.ValueKind == JsonValueKind.Object && element.TryGetProperty(prop, out var value) && value.ValueKind == JsonValueKind.String)
         {
             var text = value.GetString();
             if (!string.IsNullOrWhiteSpace(text))
@@ -74,36 +78,31 @@ public static class ModelsSchemas
 
     private static Guid RequireGuid(JsonElement element, string prop)
     {
-        if (element.TryGetProperty(prop, out var value) && value.ValueKind == JsonValueKind.String && Guid.TryParse(value.GetString(), out var id))
+        if (element.ValueKind == JsonValueKind.Object && element.TryGetProperty(prop, out var value) && value.ValueKind == JsonValueKind.String && Guid.TryParse(value.GetString(), out var id))
         {
             return id;
         }
         throw new ArgumentException($"{prop} is required and must be a GUID.");
     }
 
-    private static int RequireInt(JsonElement element, string prop)
-    {
-        if (element.TryGetProperty(prop, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number))
-        {
-            return number;
-        }
-        throw new ArgumentException($"{prop} is required and must be an integer.");
-    }
-
     private static decimal RequireDecimal(JsonElement element, string prop)
     {
-        if (element.TryGetProperty(prop, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetDecimal(out var number))
+        if (element.ValueKind == JsonValueKind.Object && element.TryGetProperty(prop, out var value))
         {
-            return number;
+            if (value.ValueKind == JsonValueKind.Number && value.TryGetDecimal(out var num))
+                return num;
+            if (value.ValueKind == JsonValueKind.String && decimal.TryParse(value.GetString(), out var parsed))
+                return parsed;
         }
+
         throw new ArgumentException($"{prop} is required and must be a decimal.");
     }
 
-    private static IReadOnlyDictionary<string, string> RequireDict(JsonElement element, string prop)
+    private static IReadOnlyDictionary<string, string> ReadDict(JsonElement element, string prop)
     {
-        if (!element.TryGetProperty(prop, out var value) || value.ValueKind != JsonValueKind.Object)
+        if (element.ValueKind != JsonValueKind.Object || !element.TryGetProperty(prop, out var value) || value.ValueKind != JsonValueKind.Object)
         {
-            throw new ArgumentException($"{prop} is required and must be an object.");
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         }
 
         var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -114,48 +113,6 @@ public static class ModelsSchemas
                 dict[item.Name] = item.Value.GetString()!;
             }
         }
-
         return dict;
     }
-    public sealed record ModelSearchDynamicIntent(
-    IReadOnlyDictionary<string, string?> Filters,
-    int Page,
-    int PageSize);
-    public static ValidationResult<ModelSearchDynamicIntent> ValidateSearchDynamic(JsonElement args)
-    {
-        var page = 1; // default;
-        var pageSize = 20; // default;
-
-        if (RequireInt(args, "page") != 0) { page = RequireInt(args, "page"); };
-        if (RequireInt(args, "pageSize") != 0) { pageSize = RequireInt(args, "pageSize"); };
-        
-        page = Math.Max(1, page);
-        pageSize = Math.Clamp(pageSize, 1, 200);
-
-        var filters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-
-        if (args.TryGetProperty("filters", out var f) && f.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var p in f.EnumerateObject())
-            {
-                // only accept string-like values; ignore null/others
-                if (p.Value.ValueKind == JsonValueKind.String)
-                    filters[p.Name] = p.Value.GetString();
-                else if (p.Value.ValueKind == JsonValueKind.Number)
-                    filters[p.Name] = p.Value.ToString();
-                else if (p.Value.ValueKind == JsonValueKind.Null)
-                    filters[p.Name] = null;
-            }
-        }
-
-        return ValidationResult<ModelSearchDynamicIntent>.Success(
-            new ModelSearchDynamicIntent(filters, page, pageSize));
-    }
-    public static ValidationResult<ModelsFiltersCatalogIntent> ValidateFiltersCatalog(JsonElement args)
-    {
-        // Tool không cần input
-        return ValidationResult<ModelsFiltersCatalogIntent>.Success(new ModelsFiltersCatalogIntent());
-    }
-
-
 }

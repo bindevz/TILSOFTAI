@@ -2,7 +2,7 @@ using System.Security;
 using System.Text.RegularExpressions;
 using TILSOFTAI.Domain.Entities;
 using TILSOFTAI.Domain.ValueObjects;
-using ExecutionContext = TILSOFTAI.Domain.ValueObjects.ExecutionContext;
+using TSExecutionContext = TILSOFTAI.Domain.ValueObjects.TSExecutionContext;
 
 namespace TILSOFTAI.Application.Validators;
 
@@ -45,7 +45,7 @@ public static class BusinessValidators
         }
     }
 
-    public static void EnsureWriteAuthorized(string toolName, ExecutionContext context, IEnumerable<string> allowedRoles)
+    public static void EnsureWriteAuthorized(string toolName, TSExecutionContext context, IEnumerable<string> allowedRoles)
     {
         if (!allowedRoles.Any(context.IsInRole))
         {

@@ -1,5 +1,5 @@
 using System.Security;
-using ExecutionContext = TILSOFTAI.Domain.ValueObjects.ExecutionContext;
+using TSExecutionContext = TILSOFTAI.Domain.ValueObjects.TSExecutionContext;
 
 namespace TILSOFTAI.Application.Permissions;
 
@@ -9,6 +9,10 @@ public sealed class RbacService
     private static readonly string[] WriteRoles = { "admin", "ops" };
     private static readonly Dictionary<string, string[]> ToolRoles = new(StringComparer.OrdinalIgnoreCase)
     {
+        //SYSTEM FILLTERS
+        ["filters.catalog"] = ReadRoles,
+
+
         ["orders.query"] = ReadRoles,
         ["orders.summary"] = ReadRoles,
         ["orders.create.prepare"] = WriteRoles,
@@ -22,10 +26,11 @@ public sealed class RbacService
         ["models.attributes.list"] = ReadRoles,
         ["models.price.analyze"] = ReadRoles,
         ["models.create.prepare"] = WriteRoles,
-        ["models.create.commit"] = WriteRoles
+        ["models.create.commit"] = WriteRoles,
+        ["models.count"] = ReadRoles
     };
 
-    public void EnsureReadAllowed(string toolName, ExecutionContext context)
+    public void EnsureReadAllowed(string toolName, TSExecutionContext context)
     {
         if (!ToolRoles.TryGetValue(toolName, out var roles) || !roles.Any(context.IsInRole))
         {
@@ -33,7 +38,7 @@ public sealed class RbacService
         }
     }
 
-    public void EnsureWriteAllowed(string toolName, ExecutionContext context)
+    public void EnsureWriteAllowed(string toolName, TSExecutionContext context)
     {
         if (!ToolRoles.TryGetValue(toolName, out var roles))
         {

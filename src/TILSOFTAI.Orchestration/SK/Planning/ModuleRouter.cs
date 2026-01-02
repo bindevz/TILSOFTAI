@@ -1,4 +1,4 @@
-using ExecutionContext = TILSOFTAI.Domain.ValueObjects.ExecutionContext;
+using TSExecutionContext = TILSOFTAI.Domain.ValueObjects.TSExecutionContext;
 
 namespace TILSOFTAI.Orchestration.SK.Planning;
 
@@ -8,7 +8,7 @@ namespace TILSOFTAI.Orchestration.SK.Planning;
 /// </summary>
 public sealed class ModuleRouter
 {
-    public IReadOnlyCollection<string> SelectModules(string userText, ExecutionContext context)
+    public IReadOnlyCollection<string> SelectModules(string userText, TSExecutionContext context)
     {
         var modules = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var t = (userText ?? string.Empty).ToLowerInvariant();

@@ -31,7 +31,7 @@ public sealed class OrdersService
         _auditLogger = auditLogger;
     }
 
-    public async Task<PagedResult<Order>> QueryOrdersAsync(OrderQuery query, TILSOFTAI.Domain.ValueObjects.ExecutionContext context, CancellationToken cancellationToken)
+    public async Task<PagedResult<Order>> QueryOrdersAsync(OrderQuery query, TILSOFTAI.Domain.ValueObjects.TSExecutionContext context, CancellationToken cancellationToken)
     {
         _rbac.EnsureReadAllowed("orders.query", context);
         BusinessValidators.ValidateOrderQuery(query);
@@ -39,7 +39,7 @@ public sealed class OrdersService
         return await _ordersRepository.QueryAsync(context.TenantId, query, cancellationToken);
     }
 
-    public async Task<OrderSummary> SummarizeOrdersAsync(OrderQuery query, TILSOFTAI.Domain.ValueObjects.ExecutionContext context, CancellationToken cancellationToken)
+    public async Task<OrderSummary> SummarizeOrdersAsync(OrderQuery query, TILSOFTAI.Domain.ValueObjects.TSExecutionContext context, CancellationToken cancellationToken)
     {
         _rbac.EnsureReadAllowed("orders.summary", context);
         BusinessValidators.ValidateOrderQuery(query);
@@ -50,7 +50,7 @@ public sealed class OrdersService
             TimeSpan.FromMinutes(1));
     }
 
-    public async Task<object> PrepareCreateAsync(Guid customerId, Guid modelId, string? color, int quantity, TILSOFTAI.Domain.ValueObjects.ExecutionContext context, CancellationToken ct)
+    public async Task<object> PrepareCreateAsync(Guid customerId, Guid modelId, string? color, int quantity, TILSOFTAI.Domain.ValueObjects.TSExecutionContext context, CancellationToken ct)
     {
         _rbac.EnsureWriteAllowed("orders.create.prepare", context);
         BusinessValidators.EnsureWriteAuthorized("orders.create.prepare", context, new[] { "admin", "ops" });
@@ -100,7 +100,7 @@ public sealed class OrdersService
         };
     }
 
-    public async Task<Order> CommitCreateAsync(string confirmationId, TILSOFTAI.Domain.ValueObjects.ExecutionContext context, CancellationToken ct)
+    public async Task<Order> CommitCreateAsync(string confirmationId, TILSOFTAI.Domain.ValueObjects.TSExecutionContext context, CancellationToken ct)
     {
         _rbac.EnsureWriteAllowed("orders.create.commit", context);
         BusinessValidators.EnsureWriteAuthorized("orders.create.commit", context, new[] { "admin", "ops" });

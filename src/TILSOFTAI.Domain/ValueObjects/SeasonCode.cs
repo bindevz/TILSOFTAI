@@ -16,7 +16,16 @@ public sealed record SeasonCode(string Value)
         {
             var first = int.Parse(shortMatch.Groups["first"].Value);
             var second = int.Parse(shortMatch.Groups["second"].Value);
-            return new SeasonCode($"{2000 + first}-{2000 + second}");
+            // Prefer a human-readable canonical format: 2024/2025
+            // Handle common shorthand such as 24/25.
+            var y1 = 2000 + first;
+            var y2 = 2000 + second;
+            if (second < first)
+            {
+                // crossing century, e.g. 99/00
+                y2 += 100;
+            }
+            return new SeasonCode($"{y1}/{y2}");
         }
 
         var longMatch = LongPattern.Match(normalizedInput);
@@ -24,7 +33,7 @@ public sealed record SeasonCode(string Value)
         {
             var first = int.Parse(longMatch.Groups["first"].Value);
             var second = int.Parse(longMatch.Groups["second"].Value);
-            return new SeasonCode($"{first}-{second}");
+            return new SeasonCode($"{first}/{second}");
         }
 
         throw new ArgumentException("Unsupported season format.", nameof(input));

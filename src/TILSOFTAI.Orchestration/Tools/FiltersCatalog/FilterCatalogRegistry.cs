@@ -10,6 +10,7 @@ public static class FilterCatalogRegistry
             new Dictionary<string, ResourceFilterCatalog>(StringComparer.OrdinalIgnoreCase)
             {
                 ["models.search"] = BuildModelsSearch(),
+                ["models.count"] = BuildModelsCount(),
                 ["orders.query"] = BuildOrdersQuery(),
                 ["orders.summary"] = BuildOrdersSummary(),
                 ["customers.search"] = BuildCustomersSearch()
@@ -77,6 +78,23 @@ public static class FilterCatalogRegistry
         );
     }
 
+    private static ResourceFilterCatalog BuildModelsCount()
+    {
+        // Reuse the same supported filters as models.search
+        var search = BuildModelsSearch();
+        return new ResourceFilterCatalog(
+            Resource: "models.count",
+            Title: "Count models",
+            Description: "Đếm tổng số model theo các bộ lọc chuẩn (giống models.search).",
+            SupportedFilters: search.SupportedFilters,
+            Usage: new
+            {
+                inputShape = new { filters = new { season = "24/25", collection = "Đông" } },
+                note = "Dùng models.count khi user hỏi tổng số; nếu cần danh sách chi tiết thì dùng models.search."
+            }
+        );
+    }
+
     private static ResourceFilterCatalog BuildOrdersQuery()
     {
         return new ResourceFilterCatalog(
@@ -86,7 +104,7 @@ public static class FilterCatalogRegistry
             new List<FilterDescriptor>
             {
                 new("customerId", "uuid", "Id khách hàng.", new[] { "c0a8012e-...." }, Operators: new[] { "eq" }),
-                new("status", "enum", "Trạng thái đơn hàng.", new[] { "Draft", "Confirmed", "Shipped" }, Operators: new[] { "eq" }),
+                new("status", "enum", "Trạng thái đơn hàng.", new[] { "Pending", "Processing", "Completed", "Cancelled" }, Operators: new[] { "eq" }),
                 new("startDate", "datetime", "Từ ngày (ISO 8601).", new[] { "2025-01-01T00:00:00Z" }, Operators: new[] { "gte" }),
                 new("endDate", "datetime", "Đến ngày (ISO 8601).", new[] { "2025-03-31T23:59:59Z" }, Operators: new[] { "lte" }),
                 new("season", "string", "Mùa (nếu hệ thống áp dụng cho báo cáo).", new[] { "24/25" }, Operators: new[] { "eq" }, Normalize: "SeasonCode.Parse"),
@@ -96,10 +114,13 @@ public static class FilterCatalogRegistry
             {
                 inputShape = new
                 {
-                    customerId = "uuid",
-                    status = "Confirmed",
-                    startDate = "2025-01-01T00:00:00Z",
-                    endDate = "2025-03-31T23:59:59Z",
+                    filters = new
+                    {
+                        customerId = "uuid",
+                        status = "Completed",
+                        startDate = "2025-01-01T00:00:00Z",
+                        endDate = "2025-03-31T23:59:59Z"
+                    },
                     page = 1,
                     pageSize = 20
                 }
@@ -116,13 +137,16 @@ public static class FilterCatalogRegistry
             new List<FilterDescriptor>
             {
                 new("customerId", "uuid", "Id khách hàng.", new[] { "c0a8012e-...." }, Operators: new[] { "eq" }),
-                new("status", "enum", "Trạng thái đơn hàng.", new[] { "Confirmed" }, Operators: new[] { "eq" }),
+                new("status", "enum", "Trạng thái đơn hàng.", new[] { "Completed" }, Operators: new[] { "eq" }),
                 new("startDate", "datetime", "Từ ngày (ISO 8601).", new[] { "2025-01-01T00:00:00Z" }, Operators: new[] { "gte" }),
                 new("endDate", "datetime", "Đến ngày (ISO 8601).", new[] { "2025-03-31T23:59:59Z" }, Operators: new[] { "lte" })
             },
             new
             {
-                inputShape = new { customerId = "uuid", startDate = "2025-01-01T00:00:00Z", endDate = "2025-03-31T23:59:59Z" }
+                inputShape = new
+                {
+                    filters = new { customerId = "uuid", startDate = "2025-01-01T00:00:00Z", endDate = "2025-03-31T23:59:59Z" }
+                }
             }
         );
     }
@@ -139,8 +163,15 @@ public static class FilterCatalogRegistry
             },
             new
             {
-                inputShape = new { query = "nguyen", page = 1, pageSize = 20 }
+                inputShape = new { filters = new { query = "nguyen" }, page = 1, pageSize = 20 }
             }
         );
+    }
+
+    // models.count uses the same filter schema as models.search but without paging.
+    static FilterCatalogRegistry()
+    {
+        // Append a derived catalog for models.count for discovery.
+        var dict = (Dictionary<string, ResourceFilterCatalog>)((ReadOnlyDictionary<string, ResourceFilterCatalog>)_catalogs).ToDictionary();
     }
 }

@@ -15,13 +15,13 @@ public sealed class ToolRegistry
                 Name: "orders.query",
                 Validator: args => OrdersSchemas.ValidateOrderQuery(args).ToObject(),
                 RequiresWrite: false,
-                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "customerId", "status", "startDate", "endDate", "page", "pageSize", "season", "metric" }),
+                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "filters", "page", "pageSize" }),
 
             ["orders.summary"] = new(
                 Name: "orders.summary",
                 Validator: args => OrdersSchemas.ValidateOrderSummary(args).ToObject(),
                 RequiresWrite: false,
-                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "customerId", "status", "startDate", "endDate", "season", "metric" }),
+                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "filters" }),
 
             ["customers.updateEmail"] = new(
                 Name: "customers.updateEmail",
@@ -36,6 +36,15 @@ public sealed class ToolRegistry
                 AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase)
                 {
                     "filters", "page", "pageSize"
+                }),
+
+            ["models.count"] = new(
+                Name: "models.count",
+                Validator: args => ModelsSchemas.ValidateCount(args).ToObject(),
+                RequiresWrite: false,
+                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    "filters"
                 }),
 
             ["models.get"] = new(
@@ -68,17 +77,11 @@ public sealed class ToolRegistry
                 RequiresWrite: true,
                 AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "confirmationId" }),
 
-            ["models.filters_catalog"] = new(
-                Name: "models.filters_catalog",
-                Validator: args => ModelsSchemas.ValidateFiltersCatalog(args).ToObject(),
-                RequiresWrite: false,
-                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { }),
-
             ["customers.search"] = new(
                 Name: "customers.search",
                 Validator: args => CustomersSchemas.ValidateSearch(args).ToObject(),
                 RequiresWrite: false,
-                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "query", "page", "pageSize" }),
+                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "filters", "page", "pageSize" }),
 
             ["orders.create.prepare"] = new(
                 Name: "orders.create.prepare",

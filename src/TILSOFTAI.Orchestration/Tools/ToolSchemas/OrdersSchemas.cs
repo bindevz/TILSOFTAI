@@ -1,50 +1,23 @@
 using System.Text.Json;
-using TILSOFTAI.Domain.Entities;
 using TILSOFTAI.Orchestration.Tools;
 
 namespace TILSOFTAI.Orchestration.Tools.ToolSchemas;
 
 public static class OrdersSchemas
 {
-    public static ValidationResult<OrderQueryIntent> ValidateOrderQuery(JsonElement arguments)
+    public static ValidationResult<OrderQueryIntent> ValidateOrderQuery(JsonElement args)
     {
-        var customerId = GetGuid(arguments, "customerId");
-        var status = GetStatus(arguments);
-        var startDate = RequireDate(arguments, "startDate");
-        var endDate = RequireDate(arguments, "endDate");
-        var season = GetString(arguments, "season");
-        var metric = GetString(arguments, "metric");
-        var pageNumber = RequireInt(arguments, "page");
-        var pageSize = RequireInt(arguments, "pageSize");
+        var filters = SchemaParsing.ReadFilters(args);
+        var page = Math.Max(1, SchemaParsing.ReadInt(args, "page", 1));
+        var pageSize = Math.Clamp(SchemaParsing.ReadInt(args, "pageSize", 50), 1, 500);
 
-        if (!startDate.HasValue && !endDate.HasValue)
-        {
-            return ValidationResult<OrderQueryIntent>.Fail("startDate or endDate is required.");
-        }
-
-        if (pageNumber <= 0 || pageSize <= 0)
-        {
-            return ValidationResult<OrderQueryIntent>.Fail("Pagination values must be positive.");
-        }
-
-        return ValidationResult<OrderQueryIntent>.Success(new OrderQueryIntent(customerId, status, startDate, endDate, pageNumber, pageSize, season, metric));
+        return ValidationResult<OrderQueryIntent>.Success(new OrderQueryIntent(filters, page, pageSize));
     }
 
-    public static ValidationResult<OrderSummaryIntent> ValidateOrderSummary(JsonElement arguments)
+    public static ValidationResult<OrderSummaryIntent> ValidateOrderSummary(JsonElement args)
     {
-        var customerId = GetGuid(arguments, "customerId");
-        var status = GetStatus(arguments);
-        var startDate = RequireDate(arguments, "startDate");
-        var endDate = RequireDate(arguments, "endDate");
-        var season = GetString(arguments, "season");
-        var metric = GetString(arguments, "metric");
-
-        if (!startDate.HasValue && !endDate.HasValue)
-        {
-            return ValidationResult<OrderSummaryIntent>.Fail("startDate or endDate is required.");
-        }
-
-        return ValidationResult<OrderSummaryIntent>.Success(new OrderSummaryIntent(customerId, status, startDate, endDate, season, metric));
+        var filters = SchemaParsing.ReadFilters(args);
+        return ValidationResult<OrderSummaryIntent>.Success(new OrderSummaryIntent(filters));
     }
 
     public static ValidationResult<OrderCreatePrepareIntent> ValidateOrderCreatePrepare(JsonElement arguments)
@@ -85,78 +58,5 @@ public static class OrdersSchemas
         }
 
         return ValidationResult<OrderCreateCommitIntent>.Success(new OrderCreateCommitIntent(idElement.GetString()!.Trim()));
-    }
-
-    private static Guid? GetGuid(JsonElement element, string property)
-    {
-        if (element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String && Guid.TryParse(value.GetString(), out var parsed))
-        {
-            return parsed;
-        }
-
-        return null;
-    }
-
-    private static DateTimeOffset? GetDate(JsonElement element, string property)
-    {
-        if (element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(value.GetString(), out var parsed))
-        {
-            return parsed;
-        }
-
-        return null;
-    }
-
-    private static OrderStatus? GetStatus(JsonElement element)
-    {
-        if (element.TryGetProperty("status", out var value) && value.ValueKind == JsonValueKind.String)
-        {
-            var text = value.GetString();
-            if (Enum.TryParse<OrderStatus>(text, true, out var status))
-            {
-                return status;
-            }
-        }
-
-        return null;
-    }
-
-    private static string? GetString(JsonElement element, string property)
-    {
-        if (element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String)
-        {
-            var text = value.GetString();
-            if (!string.IsNullOrWhiteSpace(text))
-            {
-                return text;
-            }
-        }
-
-        return null;
-    }
-
-    private static DateTimeOffset? RequireDate(JsonElement element, string property)
-    {
-        if (!element.TryGetProperty(property, out var value))
-        {
-            return null;
-        }
-
-        if (value.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(value.GetString(), out var parsed))
-        {
-            return parsed;
-        }
-
-        throw new ArgumentException($"{property} must be an ISO-8601 string date.");
-    }
-
-    private static int RequireInt(JsonElement element, string property)
-    {
-        if (!element.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out var parsed))
-        {
-            throw new ArgumentException($"{property} is required and must be an integer.");
-        }
-
-        return parsed;
     }
 }

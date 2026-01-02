@@ -4,7 +4,7 @@ using TILSOFTAI.Application.Validators;
 using TILSOFTAI.Domain.Entities;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Domain.ValueObjects;
-using ExecutionContext = TILSOFTAI.Domain.ValueObjects.ExecutionContext;
+using TSExecutionContext = TILSOFTAI.Domain.ValueObjects.TSExecutionContext;
 
 namespace TILSOFTAI.Application.Services;
 
@@ -23,29 +23,29 @@ public sealed class ModelsService
         _auditLogger = auditLogger;
     }
 
-    public Task<PagedResult<Model>> SearchAsync(string tenantId, string? rangeName, string? modelCode, string? modelName, string? season, string? collection, int page, int size, ExecutionContext context, CancellationToken cancellationToken)
+    public Task<PagedResult<Model>> SearchAsync(string tenantId, string? rangeName, string? modelCode, string? modelName, string? season, string? collection, int page, int size, TSExecutionContext context, CancellationToken cancellationToken)
     {
         BusinessValidators.ValidatePage(page, size);
         season = NormalizeSeason(season);
         return _modelRepository.SearchAsync(context.TenantId, rangeName, modelCode, modelName, season, collection, page, size, cancellationToken);
     }
 
-    public Task<Model?> GetAsync(Guid id, ExecutionContext context, CancellationToken cancellationToken)
+    public Task<Model?> GetAsync(Guid id, TSExecutionContext context, CancellationToken cancellationToken)
     {
         return _modelRepository.GetAsync(context.TenantId, id, cancellationToken);
     }
 
-    public Task<IReadOnlyCollection<ModelAttribute>> ListAttributesAsync(Guid modelId, ExecutionContext context, CancellationToken cancellationToken)
+    public Task<IReadOnlyCollection<ModelAttribute>> ListAttributesAsync(Guid modelId, TSExecutionContext context, CancellationToken cancellationToken)
     {
         return _modelRepository.ListAttributesAsync(context.TenantId, modelId, cancellationToken);
     }
 
-    public Task<PriceAnalysis> AnalyzePriceAsync(Guid modelId, ExecutionContext context, CancellationToken cancellationToken)
+    public Task<PriceAnalysis> AnalyzePriceAsync(Guid modelId, TSExecutionContext context, CancellationToken cancellationToken)
     {
         return _modelRepository.AnalyzePriceAsync(context.TenantId, modelId, cancellationToken);
     }
 
-    public async Task<object> PrepareCreateAsync(string name, string category, decimal basePrice, IReadOnlyDictionary<string, string> attributes, ExecutionContext context, CancellationToken cancellationToken)
+    public async Task<object> PrepareCreateAsync(string name, string category, decimal basePrice, IReadOnlyDictionary<string, string> attributes, TSExecutionContext context, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(category))
         {
@@ -82,7 +82,7 @@ public sealed class ModelsService
         };
     }
 
-    public async Task<Model> CommitCreateAsync(string confirmationId, ExecutionContext context, CancellationToken cancellationToken)
+    public async Task<Model> CommitCreateAsync(string confirmationId, TSExecutionContext context, CancellationToken cancellationToken)
     {
         var plan = await _planService.ConsumePlanAsync(confirmationId, "models.create", context, cancellationToken);
         var name = plan.Data["name"];
