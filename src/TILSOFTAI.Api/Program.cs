@@ -71,6 +71,10 @@ builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.Governance.AutoInvocationC
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.Planning.PlannerRouter>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.Planning.StepwiseLoopRunner>();
 
+//Filter Catalog
+builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.FiltersCatalog.IFilterCatalogService,
+                              TILSOFTAI.Orchestration.Tools.FiltersCatalog.FilterCatalogService>();
+
 
 builder.Services.Configure<RateLimitOptions>(builder.Configuration.GetSection("RateLimiting"));
 

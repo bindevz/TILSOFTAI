@@ -37,6 +37,8 @@ public sealed class ModuleRouter
         if (modules.Count == 0)
             return Array.Empty<string>();
 
+        //nếu có ít nhất 1 module business được chọn, thì add thêm common
+        modules.Add("common");
         return modules;
     }
 

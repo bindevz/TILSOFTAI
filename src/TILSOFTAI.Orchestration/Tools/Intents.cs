@@ -21,7 +21,6 @@ public sealed record OrderSummaryIntent(
     string? Metric);
 
 public sealed record UpdateEmailIntent(Guid? CustomerId, string? Email, string? ConfirmationId);
-
 public sealed record ModelSearchIntent(string? RangeName, string? ModelCode, string? ModelName, string? Season, string? Collection, int Page, int PageSize);
 public sealed record ModelGetIntent(Guid ModelId);
 public sealed record ModelListAttributesIntent(Guid ModelId);
@@ -31,3 +30,7 @@ public sealed record ModelCreateCommitIntent(string ConfirmationId);
 public sealed record CustomerSearchIntent(string Query, int Page, int PageSize);
 public sealed record OrderCreatePrepareIntent(Guid CustomerId, Guid ModelId, string? Color, int Quantity);
 public sealed record OrderCreateCommitIntent(string ConfirmationId);
+public sealed record ModelsFiltersCatalogIntent();
+public sealed record FiltersCatalogIntent(string? Resource, bool IncludeValues);
+
+

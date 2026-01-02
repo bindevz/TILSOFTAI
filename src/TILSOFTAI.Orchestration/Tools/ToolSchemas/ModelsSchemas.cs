@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 
 namespace TILSOFTAI.Orchestration.Tools.ToolSchemas;
 
@@ -117,4 +117,45 @@ public static class ModelsSchemas
 
         return dict;
     }
+    public sealed record ModelSearchDynamicIntent(
+    IReadOnlyDictionary<string, string?> Filters,
+    int Page,
+    int PageSize);
+    public static ValidationResult<ModelSearchDynamicIntent> ValidateSearchDynamic(JsonElement args)
+    {
+        var page = 1; // default;
+        var pageSize = 20; // default;
+
+        if (RequireInt(args, "page") != 0) { page = RequireInt(args, "page"); };
+        if (RequireInt(args, "pageSize") != 0) { pageSize = RequireInt(args, "pageSize"); };
+        
+        page = Math.Max(1, page);
+        pageSize = Math.Clamp(pageSize, 1, 200);
+
+        var filters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+        if (args.TryGetProperty("filters", out var f) && f.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var p in f.EnumerateObject())
+            {
+                // only accept string-like values; ignore null/others
+                if (p.Value.ValueKind == JsonValueKind.String)
+                    filters[p.Name] = p.Value.GetString();
+                else if (p.Value.ValueKind == JsonValueKind.Number)
+                    filters[p.Name] = p.Value.ToString();
+                else if (p.Value.ValueKind == JsonValueKind.Null)
+                    filters[p.Name] = null;
+            }
+        }
+
+        return ValidationResult<ModelSearchDynamicIntent>.Success(
+            new ModelSearchDynamicIntent(filters, page, pageSize));
+    }
+    public static ValidationResult<ModelsFiltersCatalogIntent> ValidateFiltersCatalog(JsonElement args)
+    {
+        // Tool không cần input
+        return ValidationResult<ModelsFiltersCatalogIntent>.Success(new ModelsFiltersCatalogIntent());
+    }
+
+
 }

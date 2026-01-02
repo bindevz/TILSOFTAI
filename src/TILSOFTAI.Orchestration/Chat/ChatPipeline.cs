@@ -188,6 +188,7 @@ public sealed class ChatPipeline
         Bạn là trợ lý nghiệp vụ ERP.
 
         Quy tắc công cụ (tools/functions):
+        - Nếu không chắc filters hợp lệ cho nghiệp vụ, hãy gọi filters-catalog (resource tương ứng) trước khi gọi tool dữ liệu.
         - Nếu yêu cầu CẦN dữ liệu nội bộ (giá, tồn kho, đơn hàng, khách hàng, model, doanh số...) thì PHẢI gọi tools để lấy evidence.
         - Nếu câu hỏi là nghiệp vụ ERP và CẦN dữ liệu nội bộ nhưng hệ thống CHƯA có tool phù hợp, hãy trả lời đúng mẫu: "Hiện tại tôi chưa được cập nhật tính năng này!" (có thể kèm gợi ý liên hệ quản trị hệ thống).
         - Nếu câu hỏi KHÔNG cần dữ liệu nội bộ (chào hỏi, giải thích khái niệm, hướng dẫn chung...), bạn được trả lời tự nhiên như một chatbot thông thường.

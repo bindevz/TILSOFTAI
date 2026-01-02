@@ -15,48 +15,20 @@ public sealed class ModelsToolsPlugin
     public ModelsToolsPlugin(ToolInvoker invoker) => _invoker = invoker;
 
     [KernelFunction("count")]
-    [Description("Đếm tổng số model. Có thể lọc theo season (vd: '24/25' hoặc 2025/2025).")]
-    public async Task<object> CountAsync(
-        string? rangeName = null,
-        string? modelCode = null,
-        string? modelName = null,
-        string? season = null,
-        string? collection = null,
+    [Description("Đếm tổng số model theo bộ lọc động (season/collection/rangeName/modelCode/modelName).")]
+    public Task<object> CountAsync(
+        Dictionary<string, string?>? filters = null,
         CancellationToken ct = default)
-    {
-        var raw = await _invoker.ExecuteAsync(
-            "models.search",
-            new { rangeName, modelCode, modelName, season, collection, page = 1, pageSize = 1 },
-            ct);
-
-        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(raw, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
-        if (doc.RootElement.TryGetProperty("data", out var data) &&
-            (data.TryGetProperty("totalCount", out var total) || data.TryGetProperty("TotalCount", out total)) &&
-            (total.ValueKind == JsonValueKind.Number || total.ValueKind == JsonValueKind.String))
-        {
-            var n = total.ValueKind == JsonValueKind.Number
-                ? total.GetInt32()
-                : int.TryParse(total.GetString(), out var parsed) ? parsed : 0;
-
-            return new { totalCount = n, season };
-        }
-
-        return raw;
-    }
-
+    => _invoker.ExecuteAsync("models.count", new { filters }, ct);
 
     [KernelFunction("search")]
-    [Description("Tìm model theo các bộ lọc. Dùng season dạng '24/25' hoặc '2024/2025'. Kết quả có TotalCount.")]
+    [Description("Tìm model theo bộ lọc động. filters có thể gồm: season, collection, rangeName, modelCode, modelName.")]
     public Task<object> SearchAsync(
-        string? rangeName = null,
-        string? modelCode = null,
-        string? modelName = null,
-        string? season = null,
-        string? collection = null,
+        Dictionary<string, string?>? filters = null,
         int page = 1,
         int pageSize = 20,
         CancellationToken ct = default)
-    => _invoker.ExecuteAsync("models.search", new { rangeName, modelCode, modelName, season, collection, page, pageSize }, ct);
+    => _invoker.ExecuteAsync("models.search", new { filters, page, pageSize }, ct);
 
     [KernelFunction("get")]
     [Description("Lấy chi tiết model theo modelId.")]
@@ -87,4 +59,10 @@ public sealed class ModelsToolsPlugin
     [Description("Commit tạo model sau khi user xác nhận. Yêu cầu confirmationId.")]
     public Task<object> CreateCommitAsync(string confirmationId, CancellationToken ct = default)
         => _invoker.ExecuteAsync("models.create.commit", new { confirmationId }, ct);
+
+    [KernelFunction("filters_catalog")]
+    [Description("Trả về danh sách filters hợp lệ khi gọi models.search/count/stats (keys, aliases, examples). Dùng khi cần biết có thể filter theo gì.")]
+    public Task<object> FiltersCatalogAsync(CancellationToken ct = default)
+    => _invoker.ExecuteAsync("models.filters_catalog", new { }, ct);
+
 }

@@ -3,6 +3,8 @@ using TILSOFTAI.Application.Services;
 using TILSOFTAI.Domain.ValueObjects;
 using TILSOFTAI.Orchestration.Chat;
 using TILSOFTAI.Orchestration.Llm;
+using TILSOFTAI.Orchestration.Tools.FiltersCatalog;
+using static TILSOFTAI.Orchestration.Tools.ToolSchemas.ModelsSchemas;
 using ExecutionContext = TILSOFTAI.Domain.ValueObjects.ExecutionContext;
 
 namespace TILSOFTAI.Orchestration.Tools;
@@ -14,14 +16,21 @@ public sealed class ToolDispatcher
     private readonly ModelsService _modelsService;
     private readonly RbacService _rbacService;
     private readonly SemanticResolver _semanticResolver;
+    private readonly IFilterCatalogService _filterCatalogService;
 
-    public ToolDispatcher(OrdersService ordersService, CustomersService customersService, ModelsService modelsService, RbacService rbacService, SemanticResolver semanticResolver)
+    public ToolDispatcher(OrdersService ordersService, 
+        CustomersService customersService, 
+        ModelsService modelsService, 
+        RbacService rbacService, 
+        SemanticResolver semanticResolver, 
+        IFilterCatalogService filterCatalogService)
     {
         _ordersService = ordersService;
         _customersService = customersService;
         _modelsService = modelsService;
         _rbacService = rbacService;
         _semanticResolver = semanticResolver;
+        _filterCatalogService = filterCatalogService;
     }
 
     public async Task<ToolDispatchResult> DispatchAsync(string toolName, object intent, ExecutionContext context, bool requiresWrite, CancellationToken cancellationToken)
@@ -37,18 +46,25 @@ public sealed class ToolDispatcher
 
         return toolName switch
         {
+            //Master fillter;
+            "filters.catalog" => await HandleFiltersCatalogAsync((FiltersCatalogIntent)intent, context, cancellationToken),
+
             "orders.query" => await HandleOrdersQueryAsync((OrderQueryIntent)intent, context, cancellationToken),
             "orders.summary" => await HandleOrdersSummaryAsync((OrderSummaryIntent)intent, context, cancellationToken),
+            "orders.create.prepare" => await HandleOrdersCreatePrepareAsync((OrderCreatePrepareIntent)intent, context, cancellationToken),
+            "orders.create.commit" => await HandleOrdersCreateCommitAsync((OrderCreateCommitIntent)intent, context, cancellationToken),
+
             "customers.updateEmail" => await HandleUpdateEmailAsync((UpdateEmailIntent)intent, context, cancellationToken),
             "customers.search" => await HandleCustomersSearchAsync((CustomerSearchIntent)intent, context, cancellationToken),
-            "models.search" => await HandleModelsSearchAsync((ModelSearchIntent)intent, context, cancellationToken),
+
+            "models.search" => await HandleModelsSearchDynamicAsync((ModelSearchDynamicIntent)intent, context, cancellationToken),
             "models.get" => await HandleModelGetAsync((ModelGetIntent)intent, context, cancellationToken),
             "models.attributes.list" => await HandleModelAttributesAsync((ModelListAttributesIntent)intent, context, cancellationToken),
             "models.price.analyze" => await HandleModelPriceAnalyzeAsync((ModelPriceAnalyzeIntent)intent, context, cancellationToken),
             "models.create.prepare" => await HandleModelCreatePrepareAsync((ModelCreatePrepareIntent)intent, context, cancellationToken),
             "models.create.commit" => await HandleModelCreateCommitAsync((ModelCreateCommitIntent)intent, context, cancellationToken),
-            "orders.create.prepare" => await HandleOrdersCreatePrepareAsync((OrderCreatePrepareIntent)intent, context, cancellationToken),
-            "orders.create.commit" => await HandleOrdersCreateCommitAsync((OrderCreateCommitIntent)intent, context, cancellationToken),
+            "models.filters_catalog" => await HandleModelsFiltersCatalogAsync((ModelsFiltersCatalogIntent)intent, context, cancellationToken),
+
             _ => throw new ResponseContractException("Tool not allowed.")
         };
     }
@@ -138,24 +154,62 @@ public sealed class ToolDispatcher
         return CreateResult(intent, ToolExecutionResult.CreateSuccess("customers.updateEmail prepared", prepare));
     }
 
-    private async Task<ToolDispatchResult> HandleModelsSearchAsync(ModelSearchIntent intent, ExecutionContext context, CancellationToken cancellationToken)
+    private async Task<ToolDispatchResult> HandleModelsSearchDynamicAsync(ModelSearchDynamicIntent intent, ExecutionContext context, CancellationToken ct)
     {
-        var result = await _modelsService.SearchAsync(context.TenantId, intent.RangeName, intent.ModelCode, intent.ModelName, intent.Season, intent.Collection, intent.Page, intent.PageSize, context, cancellationToken);
+        // 1) canonicalize & validate keys
+        var canonical = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        var rejected = new List<string>();
+
+        foreach (var (k0, v0) in intent.Filters)
+        {
+            var k = ModelsFilterCatalog.NormalizeKey(k0);
+            if (!ModelsFilterCatalog.IsSupported(k))
+            {
+                rejected.Add(k0);
+                continue;
+            }
+
+            var v = string.IsNullOrWhiteSpace(v0) ? null : v0.Trim();
+
+            // normalization by key
+            if (k.Equals(ModelsFilterCatalog.Season, StringComparison.OrdinalIgnoreCase))
+                v = SeasonNormalizer.NormalizeToFull(v);
+
+            canonical[k] = v;
+        }
+
+        // 2) Map to fixed params for repository/SP
+        canonical.TryGetValue(ModelsFilterCatalog.RangeName, out var rangeName);
+        canonical.TryGetValue(ModelsFilterCatalog.ModelCode, out var modelCode);
+        canonical.TryGetValue(ModelsFilterCatalog.ModelName, out var modelName);
+        canonical.TryGetValue(ModelsFilterCatalog.Season, out var season);
+        canonical.TryGetValue(ModelsFilterCatalog.Collection, out var collection);
+
+        var result = await _modelsService.SearchAsync(
+            context.TenantId,
+            rangeName, modelCode, modelName, season, collection,
+            intent.Page, intent.PageSize,
+            context, ct);
+
+        // 3) Build professional contract for LLM
         var payload = new
         {
-            result.TotalCount,
-            result.PageNumber,
-            result.PageSize,
-            Models = result.Items.Select(m => new
-            {
-                m.ModelID,
-                m.ModelUD,
-                m.ModelNM,
-                m.Season,
-                m.RangeName,
-                m.Collection
+            kind = "models.search.v1",
+            schemaVersion = 1,
+            generatedAtUtc = DateTimeOffset.UtcNow,
+            filtersApplied = canonical,              // canonical keys, normalized season
+            rejectedFilters = rejected.Count == 0 ? null : rejected,
+            paging = new { page = intent.Page, pageSize = intent.PageSize, totalCount = result.TotalCount },
+            items = result.Items.Select(x => new {
+                modelId = x.ModelID,
+                modelCode = x.ModelUD,
+                modelName = x.ModelNM,
+                season = x.Season,
+                collection = x.Collection,
+                rangeName = x.RangeName
             })
         };
+
         return CreateResult(intent, ToolExecutionResult.CreateSuccess("models.search executed", payload));
     }
 
@@ -304,6 +358,19 @@ public sealed class ToolDispatcher
 
     private static ToolDispatchResult CreateResult(object normalizedIntent, ToolExecutionResult result) =>
         new(normalizedIntent, result);
+    private Task<ToolDispatchResult> HandleModelsFiltersCatalogAsync(ModelsFiltersCatalogIntent intent, ExecutionContext context, CancellationToken ct)
+    {
+        var payload = TILSOFTAI.Orchestration.Tools.Filters.ModelsFiltersCatalogProvider.GetV1();
+
+        return Task.FromResult(CreateResult(intent,
+            ToolExecutionResult.CreateSuccess("models.filters_catalog executed", payload)));
+    }
+
+    private Task<ToolDispatchResult> HandleFiltersCatalogAsync(FiltersCatalogIntent intent, ExecutionContext context, CancellationToken ct)
+    {
+        var payload = _filterCatalogService.GetCatalog(intent.Resource, intent.IncludeValues);
+        return Task.FromResult(CreateResult(intent, ToolExecutionResult.CreateSuccess("filters.catalog executed", payload)));
+    }
 }
 
 public sealed record ToolDispatchResult(object NormalizedIntent, ToolExecutionResult Result);
