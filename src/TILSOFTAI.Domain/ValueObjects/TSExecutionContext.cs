@@ -7,5 +7,16 @@ public sealed class TSExecutionContext
     public IReadOnlyCollection<string> Roles { get; init; } = Array.Empty<string>();
     public string CorrelationId { get; init; } = Guid.NewGuid().ToString("N");
 
+    /// <summary>
+    /// HTTP request identifier (typically HttpContext.TraceIdentifier).
+    /// Useful for correlating API logs with tool executions.
+    /// </summary>
+    public string RequestId { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Distributed trace identifier if available (Activity.TraceId) or a best-effort fallback.
+    /// </summary>
+    public string TraceId { get; init; } = string.Empty;
+
     public bool IsInRole(string role) => Roles.Contains(role, StringComparer.OrdinalIgnoreCase);
 }

@@ -30,6 +30,22 @@ public sealed class ModelsToolsPlugin
         CancellationToken ct = default)
     => _invoker.ExecuteAsync("models.search", new { filters, page, pageSize }, ct);
 
+    [KernelFunction("stats")]
+    [Description("Thống kê model theo nhiều chiều (rangeName/collection/season). Trả contract models.stats.v1.")]
+    public Task<object> StatsAsync(
+        Dictionary<string, string?>? filters = null,
+        int topN = 10,
+        CancellationToken ct = default)
+    => _invoker.ExecuteAsync("models.stats", new { filters, topN }, ct);
+
+    [KernelFunction("options")]
+    [Description("Lấy đầy đủ nhóm tuỳ chọn và giá trị cho 1 model. Trả contract models.options.v1. modelId lấy từ models.search (ModelID).")]
+    public Task<object> OptionsAsync(
+        int modelId,
+        bool includeConstraints = true,
+        CancellationToken ct = default)
+    => _invoker.ExecuteAsync("models.options", new { modelId, includeConstraints }, ct);
+
     [KernelFunction("get")]
     [Description("Lấy chi tiết model theo modelId.")]
     public Task<object> GetAsync(Guid modelId, CancellationToken ct = default)

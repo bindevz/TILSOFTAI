@@ -30,6 +30,45 @@ public sealed class ModelsService
         return _modelRepository.SearchAsync(context.TenantId, rangeName, modelCode, modelName, season, collection, page, size, cancellationToken);
     }
 
+    public Task<ModelsStatsResult> StatsAsync(
+        IReadOnlyDictionary<string, string?> filters,
+        int topN,
+        TSExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        // Same filter surface as models.search/models.count, but returns enterprise-grade aggregations.
+        filters ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+        filters.TryGetValue("rangeName", out var rangeName);
+        filters.TryGetValue("modelCode", out var modelCode);
+        filters.TryGetValue("modelName", out var modelName);
+        filters.TryGetValue("season", out var season);
+        filters.TryGetValue("collection", out var collection);
+
+        season = NormalizeSeason(season);
+        topN = Math.Clamp(topN, 1, 50);
+
+        return _modelRepository.GetStatsAsync(
+            context.TenantId,
+            rangeName,
+            modelCode,
+            modelName,
+            season,
+            collection,
+            topN,
+            cancellationToken);
+    }
+
+    public Task<ModelsOptionsResult> OptionsAsync(
+        int modelId,
+        bool includeConstraints,
+        TSExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        if (modelId <= 0) throw new ArgumentException("modelId must be a positive integer.");
+        return _modelRepository.GetOptionsAsync(context.TenantId, modelId, includeConstraints, cancellationToken);
+    }
+
     public Task<Model?> GetAsync(Guid id, TSExecutionContext context, CancellationToken cancellationToken)
     {
         return _modelRepository.GetAsync(context.TenantId, id, cancellationToken);

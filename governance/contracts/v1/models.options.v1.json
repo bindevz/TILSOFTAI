@@ -1,0 +1,12 @@
+{
+  "kind": "models.options.v1",
+  "schemaVersion": 1,
+  "generatedAtUtc": "2026-01-02T07:00:00Z",
+  "resource": "models.options",
+  "data": {
+    "model": { "modelId": 0, "modelCode": "", "modelName": "" },
+    "optionGroups": [],
+    "constraints": []
+  },
+  "warnings": []
+}

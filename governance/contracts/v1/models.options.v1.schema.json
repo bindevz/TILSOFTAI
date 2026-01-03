@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tilsoftai://contracts/models.options.v1",
+  "title": "models.options.v1",
+  "description": "Stable payload contract for model options (attributes/option groups/constraints). ToolInvoker wraps this in tilsoft.envelope.v1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schemaVersion",
+    "generatedAtUtc",
+    "resource",
+    "data",
+    "warnings"
+  ],
+  "properties": {
+    "kind": { "type": "string", "const": "models.options.v1" },
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "generatedAtUtc": { "type": "string", "format": "date-time" },
+    "resource": { "type": "string", "const": "models.options" },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "optionGroups", "constraints"],
+      "properties": {
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["modelId"],
+          "properties": {
+            "modelId": { "type": "integer" },
+            "modelCode": { "type": ["string", "null"] },
+            "modelName": { "type": ["string", "null"] },
+            "season": { "type": ["string", "null"] },
+            "collection": { "type": ["string", "null"] },
+            "rangeName": { "type": ["string", "null"] }
+          }
+        },
+        "optionGroups": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["groupKey", "groupName", "values"],
+            "properties": {
+              "groupKey": { "type": "string" },
+              "groupName": { "type": "string" },
+              "isRequired": { "type": "boolean" },
+              "values": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["valueKey", "valueName"],
+                  "properties": {
+                    "valueKey": { "type": "string" },
+                    "valueName": { "type": "string" },
+                    "note": { "type": ["string", "null"] }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

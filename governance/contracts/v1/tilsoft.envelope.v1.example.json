@@ -1,0 +1,22 @@
+{
+  "kind": "tilsoft.envelope.v1",
+  "schemaVersion": 1,
+  "generatedAtUtc": "2026-01-02T07:00:00Z",
+  "ok": true,
+  "tool": { "name": "models.stats", "requiresWrite": false },
+  "meta": { "tenantId": "DEFAULT", "userId": "demo", "requestId": "..." },
+  "normalizedIntent": { "action": "models.stats", "filters": {} },
+  "message": "models.stats executed",
+  "data": {
+    "kind": "models.stats.v1",
+    "schemaVersion": 1,
+    "generatedAtUtc": "2026-01-02T07:00:00Z",
+    "resource": "models.stats",
+    "filtersApplied": {},
+    "rejectedFilters": [],
+    "data": { "totalCount": 13051, "breakdowns": [] },
+    "warnings": []
+  },
+  "warnings": [],
+  "error": null
+}

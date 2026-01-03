@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tilsoftai://contracts/tilsoft.envelope.v1",
+  "title": "tilsoft.envelope.v1",
+  "description": "Enterprise envelope for all tool outputs. The LLM should primarily read: ok, tool.name, message, data (payload), error (if ok=false).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schemaVersion",
+    "generatedAtUtc",
+    "tool",
+    "ok",
+    "message",
+    "data",
+    "warnings"
+  ],
+  "properties": {
+    "kind": { "type": "string", "const": "tilsoft.envelope.v1" },
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "generatedAtUtc": { "type": "string", "format": "date-time" },
+    "ok": { "type": "boolean" },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "requiresWrite"],
+      "properties": {
+        "name": { "type": "string" },
+        "requiresWrite": { "type": "boolean" }
+      }
+    },
+    "meta": {
+      "type": ["object", "null"],
+      "additionalProperties": true
+    },
+    "normalizedIntent": {
+      "type": ["object", "null"],
+      "additionalProperties": true
+    },
+    "message": { "type": "string" },
+    "data": {
+      "description": "Tool-specific payload (e.g., models.stats.v1).",
+      "type": ["object", "array", "string", "number", "boolean", "null"]
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "error": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "details": {
+          "type": ["object", "array", "string", "number", "boolean", "null"],
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}

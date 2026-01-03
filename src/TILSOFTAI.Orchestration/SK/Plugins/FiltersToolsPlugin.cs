@@ -13,4 +13,9 @@ public sealed class FiltersToolsPlugin
     [Description("Trả về danh sách filters hợp lệ theo resource (vd: 'models.search', 'orders.query'). Nếu không truyền resource sẽ trả danh sách resources.")]
     public Task<object> CatalogAsync(string? resource = null, bool includeValues = false, CancellationToken ct = default)
         => _invoker.ExecuteAsync("filters.catalog", new { resource, includeValues }, ct);
+
+    [KernelFunction("actions_catalog")]
+    [Description("Trả về danh mục thao tác ghi (prepare/commit) và schema tham số. Dùng khi cần biết cần truyền gì để tạo/cập nhật dữ liệu.")]
+    public Task<object> ActionsCatalogAsync(string? action = null, bool includeExamples = false, CancellationToken ct = default)
+        => _invoker.ExecuteAsync("actions.catalog", new { action, includeExamples }, ct);
 }

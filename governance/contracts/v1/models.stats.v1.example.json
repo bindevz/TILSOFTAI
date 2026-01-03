@@ -1,0 +1,32 @@
+{
+  "kind": "models.stats.v1",
+  "schemaVersion": 1,
+  "generatedAtUtc": "2026-01-02T07:00:00Z",
+  "resource": "models.stats",
+  "filtersApplied": {},
+  "rejectedFilters": [],
+  "data": {
+    "totalCount": 13051,
+    "breakdowns": [
+      {
+        "dimension": "rangeName",
+        "title": "Range/Category",
+        "items": [
+          {
+            "key": "Chair",
+            "label": "Ghế",
+            "count": 500
+          }
+        ]
+      }
+    ],
+    "highlights": {
+      "topRangeName": {
+        "key": "Chair",
+        "label": "Ghế",
+        "count": 500
+      }
+    }
+  },
+  "warnings": []
+}

@@ -6,8 +6,6 @@ namespace TILSOFTAI.Infrastructure.Data;
 
 public sealed class SqlServerDbContext : DbContext, IUnitOfWork
 {
-    public DbSet<Order> Orders => Set<Order>();
-    public DbSet<Customer> Customers => Set<Customer>();
     public DbSet<Model> Models => Set<Model>();
     public DbSet<ModelAttribute> ModelAttributes => Set<ModelAttribute>();
     public DbSet<ConfirmationPlanEntity> ConfirmationPlans => Set<ConfirmationPlanEntity>();

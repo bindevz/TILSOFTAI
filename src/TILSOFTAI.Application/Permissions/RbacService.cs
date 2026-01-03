@@ -12,16 +12,9 @@ public sealed class RbacService
         //SYSTEM FILLTERS
         ["filters.catalog"] = ReadRoles,
 
-
-        ["orders.query"] = ReadRoles,
-        ["orders.summary"] = ReadRoles,
-        ["orders.create.prepare"] = WriteRoles,
-        ["orders.create.commit"] = WriteRoles,
-
-        ["customers.updateEmail"] = WriteRoles,
-        ["customers.search"] = ReadRoles,
-
         ["models.search"] = ReadRoles,
+        ["models.stats"] = ReadRoles,
+        ["models.options"] = ReadRoles,
         ["models.get"] = ReadRoles,
         ["models.attributes.list"] = ReadRoles,
         ["models.price.analyze"] = ReadRoles,

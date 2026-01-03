@@ -15,4 +15,7 @@
     <PackageReference Include="Scrutor" Version="4.2.2" />
 	<PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.15.0" />
   </ItemGroup>
+  <ItemGroup>
+    <Folder Include="DependencyInjection\" />
+  </ItemGroup>
 </Project>

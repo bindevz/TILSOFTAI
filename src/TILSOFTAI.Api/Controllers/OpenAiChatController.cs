@@ -68,12 +68,18 @@ public sealed class OpenAiChatController : ControllerBase
             ? correlationValue
             : httpContext.TraceIdentifier;
 
+        // Enterprise telemetry fields
+        var requestId = httpContext.TraceIdentifier;
+        var traceId = System.Diagnostics.Activity.Current?.TraceId.ToString() ?? correlationId;
+
         return new TILSOFTAI.Domain.ValueObjects.TSExecutionContext
         {
             TenantId = tenantId,
             UserId = userId,
             Roles = roles,
-            CorrelationId = correlationId
+            CorrelationId = correlationId,
+            RequestId = requestId,
+            TraceId = traceId
         };
     }
 

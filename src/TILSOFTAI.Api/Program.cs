@@ -1,18 +1,17 @@
 using Microsoft.EntityFrameworkCore;
+using TILSOFTAI.Api.DependencyInjection;
 using TILSOFTAI.Api.Middleware;
 using TILSOFTAI.Application.Permissions;
-using TILSOFTAI.Application.Services;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Infrastructure.Caching;
 using TILSOFTAI.Infrastructure.Data;
 using TILSOFTAI.Infrastructure.Observability;
-using TILSOFTAI.Infrastructure.Repositories;
 using TILSOFTAI.Orchestration.Chat;
 using TILSOFTAI.Orchestration.Llm;
 using TILSOFTAI.Orchestration.SK;
 using TILSOFTAI.Orchestration.SK.Plugins;
 using TILSOFTAI.Orchestration.Tools;
-using TILSOFTAI.Api.DependencyInjection;
+using TILSOFTAI.Orchestration.Tools.ActionsCatalog;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -36,7 +35,6 @@ builder.Services.AddSingleton<IAppCache>(sp => sp.GetRequiredService<AppMemoryCa
 builder.Services.AddSingleton<ToolRegistry>();
 builder.Services.AddScoped<ToolDispatcher>();
 builder.Services.AddSingleton<TokenBudget>();
-builder.Services.AddSingleton<SemanticResolver>();
 builder.Services.AddScoped<ChatPipeline>();
 builder.Services.AddSingleton<IAuditLogger, AuditLogger>();
 builder.Services.AddScoped<IConfirmationPlanStore, SqlConfirmationPlanStore>();
@@ -75,6 +73,7 @@ builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.Planning.StepwiseLoopRunne
 // Filter Catalog (Phase 2: includeValues reads DB, so keep it scoped)
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.FiltersCatalog.IFilterCatalogService,
                           TILSOFTAI.Orchestration.Tools.FiltersCatalog.FilterCatalogService>();
+builder.Services.AddSingleton<IActionsCatalogService, ActionsCatalogService>();
 
 
 builder.Services.Configure<RateLimitOptions>(builder.Configuration.GetSection("RateLimiting"));

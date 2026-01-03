@@ -11,9 +11,8 @@ public static class FilterCatalogRegistry
             {
                 ["models.search"] = BuildModelsSearch(),
                 ["models.count"] = BuildModelsCount(),
-                ["orders.query"] = BuildOrdersQuery(),
-                ["orders.summary"] = BuildOrdersSummary(),
-                ["customers.search"] = BuildCustomersSearch()
+                ["models.stats"] = BuildModelsStats(),
+                ["models.options"] = BuildModelsOptions()
             });
 
     public static IReadOnlyCollection<string> ListResources()
@@ -95,75 +94,35 @@ public static class FilterCatalogRegistry
         );
     }
 
-    private static ResourceFilterCatalog BuildOrdersQuery()
+    private static ResourceFilterCatalog BuildModelsStats()
     {
+        // Same filters as search/count, but output is an aggregation (contract v1).
+        var search = BuildModelsSearch();
         return new ResourceFilterCatalog(
-            "orders.query",
-            "Query orders",
-            "Tra cứu danh sách đơn hàng theo khách hàng/trạng thái/khoảng ngày.",
-            new List<FilterDescriptor>
+            Resource: "models.stats",
+            Title: "Models statistics",
+            Description: "Thống kê model theo nhiều chiều (rangeName/collection/season). Trả contract models.stats.v1.",
+            SupportedFilters: search.SupportedFilters,
+            Usage: new
             {
-                new("customerId", "uuid", "Id khách hàng.", new[] { "c0a8012e-...." }, Operators: new[] { "eq" }),
-                new("status", "enum", "Trạng thái đơn hàng.", new[] { "Pending", "Processing", "Completed", "Cancelled" }, Operators: new[] { "eq" }),
-                new("startDate", "datetime", "Từ ngày (ISO 8601).", new[] { "2025-01-01T00:00:00Z" }, Operators: new[] { "gte" }),
-                new("endDate", "datetime", "Đến ngày (ISO 8601).", new[] { "2025-03-31T23:59:59Z" }, Operators: new[] { "lte" }),
-                new("season", "string", "Mùa (nếu hệ thống áp dụng cho báo cáo).", new[] { "24/25" }, Operators: new[] { "eq" }, Normalize: "SeasonCode.Parse"),
-                new("metric", "string", "Chỉ số (vd: PI).", new[] { "PI" }, Operators: new[] { "eq" }, Normalize: "MetricCode.Parse")
-            },
-            new
-            {
-                inputShape = new
-                {
-                    filters = new
-                    {
-                        customerId = "uuid",
-                        status = "Completed",
-                        startDate = "2025-01-01T00:00:00Z",
-                        endDate = "2025-03-31T23:59:59Z"
-                    },
-                    page = 1,
-                    pageSize = 20
-                }
+                inputShape = new { filters = new { season = "24/25" }, topN = 10 },
+                note = "Dùng khi user hỏi thống kê: tổng số + top theo range/collection/season." 
             }
         );
     }
 
-    private static ResourceFilterCatalog BuildOrdersSummary()
+    private static ResourceFilterCatalog BuildModelsOptions()
     {
+        // This resource does not accept 'filters' (it accepts modelId).
         return new ResourceFilterCatalog(
-            "orders.summary",
-            "Orders summary",
-            "Tóm tắt đơn hàng (count/total/avg/min/max) theo filter.",
-            new List<FilterDescriptor>
+            Resource: "models.options",
+            Title: "Model options",
+            Description: "Lấy đầy đủ nhóm tuỳ chọn và giá trị cho 1 model. Trả contract models.options.v1.",
+            SupportedFilters: new List<FilterDescriptor>(),
+            Usage: new
             {
-                new("customerId", "uuid", "Id khách hàng.", new[] { "c0a8012e-...." }, Operators: new[] { "eq" }),
-                new("status", "enum", "Trạng thái đơn hàng.", new[] { "Completed" }, Operators: new[] { "eq" }),
-                new("startDate", "datetime", "Từ ngày (ISO 8601).", new[] { "2025-01-01T00:00:00Z" }, Operators: new[] { "gte" }),
-                new("endDate", "datetime", "Đến ngày (ISO 8601).", new[] { "2025-03-31T23:59:59Z" }, Operators: new[] { "lte" })
-            },
-            new
-            {
-                inputShape = new
-                {
-                    filters = new { customerId = "uuid", startDate = "2025-01-01T00:00:00Z", endDate = "2025-03-31T23:59:59Z" }
-                }
-            }
-        );
-    }
-
-    private static ResourceFilterCatalog BuildCustomersSearch()
-    {
-        return new ResourceFilterCatalog(
-            "customers.search",
-            "Search customers",
-            "Tìm khách hàng theo từ khóa.",
-            new List<FilterDescriptor>
-            {
-                new("query", "string", "Từ khóa tìm kiếm (tên/email).", new[] { "nguyen", "abc@company.com" }, Operators: new[] { "contains" })
-            },
-            new
-            {
-                inputShape = new { filters = new { query = "nguyen" }, page = 1, pageSize = 20 }
+                inputShape = new { modelId = 123, includeConstraints = true },
+                note = "modelId lấy từ models.search (ModelID)."
             }
         );
     }

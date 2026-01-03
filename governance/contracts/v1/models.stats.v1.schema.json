@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tilsoftai://contracts/models.stats.v1",
+  "title": "models.stats.v1",
+  "description": "Stable payload contract for model statistics. ToolInvoker will wrap this payload in tilsoft.envelope.v1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schemaVersion",
+    "generatedAtUtc",
+    "resource",
+    "data",
+    "warnings"
+  ],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "const": "models.stats.v1"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "generatedAtUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "resource": {
+      "type": "string",
+      "const": "models.stats"
+    },
+    "filtersApplied": {
+      "type": "object",
+      "additionalProperties": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "rejectedFilters": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "totalCount",
+        "breakdowns"
+      ],
+      "properties": {
+        "totalCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "breakdowns": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "dimension",
+              "items"
+            ],
+            "properties": {
+              "dimension": {
+                "type": "string"
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "key",
+                    "count"
+                  ],
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "label": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "highlights": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

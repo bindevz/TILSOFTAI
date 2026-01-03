@@ -13,14 +13,6 @@ public sealed class ModuleRouter
         var modules = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var t = (userText ?? string.Empty).ToLowerInvariant();
 
-        // Orders
-        if (ContainsAny(t, "đơn hàng", "tạo đơn", "order", "po", "so", "invoice"))
-            modules.Add("orders");
-
-        // Customers
-        if (ContainsAny(t, "khách hàng", "customer", "công nợ", "email"))
-            modules.Add("customers");
-
         // Models / Products
         if (ContainsAny(t, "model", "mẫu", "sản phẩm", "sku", "attribute", "giá"))
             modules.Add("models");
@@ -28,8 +20,6 @@ public sealed class ModuleRouter
         // Analytics/reporting often needs multiple modules
         if (ContainsAny(t, "báo cáo", "phân tích", "doanh số", "lợi nhuận", "kpi", "trend", "xu hướng"))
         {
-            modules.Add("orders");
-            modules.Add("customers");
             modules.Add("models");
         }
 
