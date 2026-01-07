@@ -3,11 +3,23 @@ using TILSOFTAI.Orchestration.Tools;
 
 namespace TILSOFTAI.Orchestration.Tools.ToolSchemas;
 
-internal static class DynamicIntentValidator
+/// <summary>
+/// Enterprise dynamic intent validator. Fail-closed by design.
+/// Specs are contributed by modules via <see cref="IToolInputSpecProvider"/>.
+/// </summary>
+public sealed class DynamicIntentValidator
 {
-    public static ValidationResult<DynamicToolIntent> Validate(string toolName, JsonElement args)
+    private readonly ToolInputSpecCatalog _specCatalog;
+
+    public DynamicIntentValidator(ToolInputSpecCatalog specCatalog)
     {
-        var spec = ToolInputSpecs.For(toolName);
+        _specCatalog = specCatalog;
+    }
+
+    public ValidationResult<DynamicToolIntent> Validate(string toolName, JsonElement args)
+    {
+        if (!_specCatalog.TryGet(toolName, out var spec))
+            return ValidationResult<DynamicToolIntent>.Fail($"ToolInputSpec not registered for '{toolName}'.");
 
         // Filters
         var rawFilters = SchemaParsing.ReadFilters(args);
@@ -18,7 +30,7 @@ internal static class DynamicIntentValidator
         }
         else
         {
-            // Only keep keys that are declared in the catalog.
+            // Only keep keys that are declared in the catalog/spec.
             foreach (var (k, v) in rawFilters)
             {
                 if (spec.AllowedFilterKeys.Contains(k))

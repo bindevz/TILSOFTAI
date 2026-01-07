@@ -1,106 +1,31 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 
 namespace TILSOFTAI.Orchestration.Tools;
+
+public interface IToolRegistrationProvider
+{
+    IEnumerable<ToolDefinition> GetToolDefinitions();
+}
 
 public sealed class ToolRegistry
 {
     private readonly Dictionary<string, ToolDefinition> _definitions;
 
-    public ToolRegistry()
+    public ToolRegistry(IEnumerable<IToolRegistrationProvider> providers)
     {
-        _definitions = new Dictionary<string, ToolDefinition>(StringComparer.OrdinalIgnoreCase)
+        _definitions = new Dictionary<string, ToolDefinition>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var p in providers)
         {
-            ["models.search"] = new(
-                Name: "models.search",
-                Validator: args => ToolSchemas.DynamicIntentValidator.Validate("models.search", args).ToObject(),
-                RequiresWrite: false,
-                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    "filters", "page", "pageSize"
-                }),
+            foreach (var d in p.GetToolDefinitions())
+            {
+                if (string.IsNullOrWhiteSpace(d.Name))
+                    throw new InvalidOperationException("ToolDefinition has empty Name.");
 
-            ["models.count"] = new(
-                Name: "models.count",
-                Validator: args => ToolSchemas.DynamicIntentValidator.Validate("models.count", args).ToObject(),
-                RequiresWrite: false,
-                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    "filters"
-                }),
-
-            ["models.stats"] = new(
-                Name: "models.stats",
-                Validator: args => ToolSchemas.DynamicIntentValidator.Validate("models.stats", args).ToObject(),
-                RequiresWrite: false,
-                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    "filters",
-                    "topN"
-                }),
-
-            ["models.options"] = new(
-                Name: "models.options",
-                Validator: args => ToolSchemas.DynamicIntentValidator.Validate("models.options", args).ToObject(),
-                RequiresWrite: false,
-                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    "modelId",
-                    "includeConstraints"
-                }),
-
-            ["models.get"] = new(
-                Name: "models.get",
-                Validator: args => ToolSchemas.DynamicIntentValidator.Validate("models.get", args).ToObject(),
-                RequiresWrite: false,
-                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "modelId" }),
-
-            ["models.attributes.list"] = new(
-                Name: "models.attributes.list",
-                Validator: args => ToolSchemas.DynamicIntentValidator.Validate("models.attributes.list", args).ToObject(),
-                RequiresWrite: false,
-                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "modelId" }),
-
-            ["models.price.analyze"] = new(
-                Name: "models.price.analyze",
-                Validator: args => ToolSchemas.DynamicIntentValidator.Validate("models.price.analyze", args).ToObject(),
-                RequiresWrite: false,
-                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "modelId" }),
-
-            ["models.create.prepare"] = new(
-                Name: "models.create.prepare",
-                Validator: args => ToolSchemas.DynamicIntentValidator.Validate("models.create.prepare", args).ToObject(),
-                RequiresWrite: true,
-                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "name", "category", "basePrice", "attributes" }),
-
-            ["models.create.commit"] = new(
-                Name: "models.create.commit",
-                Validator: args => ToolSchemas.DynamicIntentValidator.Validate("models.create.commit", args).ToObject(),
-                RequiresWrite: true,
-                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "confirmationId" }),
-
-            //System fillter
-            ["filters.catalog"] = new(
-                Name: "filters.catalog",
-                Validator: args => ToolSchemas.DynamicIntentValidator.Validate("filters.catalog", args).ToObject(),
-                RequiresWrite: false,
-                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    "resource",
-                    "includeValues"
-                }),
-
-            // System: actions catalog (Stage 2)
-            ["actions.catalog"] = new(
-                Name: "actions.catalog",
-                Validator: args => ToolSchemas.DynamicIntentValidator.Validate("actions.catalog", args).ToObject(),
-                RequiresWrite: false,
-                AllowedArguments: new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    "action",
-                    "includeExamples"
-                })
-
-        };
+                if (!_definitions.TryAdd(d.Name, d))
+                    throw new InvalidOperationException($"Duplicate tool definition registered: {d.Name}");
+            }
+        }
     }
 
     public IEnumerable<string> GetToolNames() => _definitions.Keys;
@@ -111,6 +36,7 @@ public sealed class ToolRegistry
     {
         intent = null;
         requiresWrite = false;
+
         if (!_definitions.TryGetValue(toolName, out var definition))
         {
             error = "Tool not allowed.";

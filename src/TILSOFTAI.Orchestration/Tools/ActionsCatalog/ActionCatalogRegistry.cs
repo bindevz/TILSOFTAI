@@ -1,41 +1,48 @@
+using System.Collections.ObjectModel;
+
 namespace TILSOFTAI.Orchestration.Tools.ActionsCatalog;
 
-/// <summary>
-/// Enterprise catalog of WRITE actions. This is the write-side complement of filters.catalog.
-/// LLM can consult this to know:
-/// - Which prepare/commit tools exist
-/// - What parameters are required
-/// - Example argument objects
-/// </summary>
-public static class ActionCatalogRegistry
+public interface IActionsCatalogRegistry
 {
-    private static readonly Dictionary<string, ActionDescriptor> _actions = new(StringComparer.OrdinalIgnoreCase)
+    IReadOnlyCollection<ActionDescriptor> List();
+    bool TryGet(string action, out ActionDescriptor descriptor);
+}
+
+/// <summary>
+/// Module extension point. Each module can contribute its own write action descriptors.
+/// </summary>
+public interface IActionsCatalogProvider
+{
+    IEnumerable<ActionDescriptor> GetActions();
+}
+
+/// <summary>
+/// Aggregates write action descriptors from all loaded modules.
+/// </summary>
+public sealed class ActionCatalogRegistry : IActionsCatalogRegistry
+{
+    private readonly IReadOnlyDictionary<string, ActionDescriptor> _actions;
+
+    public ActionCatalogRegistry(IEnumerable<IActionsCatalogProvider> providers)
     {
-        ["models.create"] = new ActionDescriptor(
-            Action: "models.create",
-            PrepareTool: "models.create.prepare",
-            CommitTool: "models.create.commit",
-            Description: "Tạo model mới (2 bước: chuẩn bị -> xác nhận -> commit).",
-            Parameters: new List<ActionParam>
+        var dict = new Dictionary<string, ActionDescriptor>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in providers)
+        {
+            foreach (var a in p.GetActions())
             {
-                new("name", "string", true, "Tên model"),
-                new("category", "string", true, "Nhóm sản phẩm (vd: chair, table, set)"),
-                new("basePrice", "decimal", true, "Giá cơ bản"),
-                new("attributes", "object<string,string>", false, "Thuộc tính bổ sung")
-            },
-            ExamplePrepareArgs: new
-            {
-                name = "Model A",
-                category = "chair",
-                basePrice = 199.99,
-                attributes = new Dictionary<string, string> { ["Frame"] = "Wood", ["Color"] = "Black" }
-            },
-            ExampleCommitArgs: new { confirmationId = "<confirmation_id>" }
-        )
-    };
+                if (string.IsNullOrWhiteSpace(a.Action))
+                    throw new InvalidOperationException("Action catalog has empty action key.");
 
-    public static IReadOnlyCollection<ActionDescriptor> List() => _actions.Values.ToList();
+                if (!dict.TryAdd(a.Action, a))
+                    throw new InvalidOperationException($"Duplicate actions.catalog action registered: {a.Action}");
+            }
+        }
 
-    public static bool TryGet(string action, out ActionDescriptor descriptor)
+        _actions = new ReadOnlyDictionary<string, ActionDescriptor>(dict);
+    }
+
+    public IReadOnlyCollection<ActionDescriptor> List() => _actions.Values.ToList();
+
+    public bool TryGet(string action, out ActionDescriptor descriptor)
         => _actions.TryGetValue(action, out descriptor!);
 }

@@ -2,11 +2,18 @@ namespace TILSOFTAI.Orchestration.Tools.ActionsCatalog;
 
 public sealed class ActionsCatalogService : IActionsCatalogService
 {
+    private readonly IActionsCatalogRegistry _registry;
+
+    public ActionsCatalogService(IActionsCatalogRegistry registry)
+    {
+        _registry = registry;
+    }
+
     public object Catalog(string? action = null, bool includeExamples = false)
     {
         if (string.IsNullOrWhiteSpace(action))
         {
-            var items = ActionCatalogRegistry.List().Select(x => ToDto(x, includeExamples)).ToList();
+            var items = _registry.List().Select(x => ToDto(x, includeExamples)).ToList();
             return new
             {
                 contract = "actions.catalog.v1",
@@ -17,7 +24,7 @@ public sealed class ActionsCatalogService : IActionsCatalogService
             };
         }
 
-        if (ActionCatalogRegistry.TryGet(action.Trim(), out var d))
+        if (_registry.TryGet(action.Trim(), out var d))
         {
             return new
             {
@@ -33,7 +40,7 @@ public sealed class ActionsCatalogService : IActionsCatalogService
         {
             contract = "actions.catalog.v1",
             error = $"Unknown action '{action}'.",
-            data = new { actions = ActionCatalogRegistry.List().Select(x => x.Action).OrderBy(x => x).ToList() }
+            data = new { actions = _registry.List().Select(x => x.Action).OrderBy(x => x).ToList() }
         };
     }
 

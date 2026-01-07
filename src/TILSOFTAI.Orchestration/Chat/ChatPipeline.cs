@@ -31,6 +31,7 @@ public sealed class ChatPipeline
     private readonly IServiceProvider _serviceProvider;
     private readonly PluginCatalog _pluginCatalog;
     private readonly ModuleRouter _moduleRouter;
+    private readonly IEnumerable<IPluginExposurePolicy> _exposurePolicies;
 
     //Plugin
 
@@ -47,7 +48,8 @@ public sealed class ChatPipeline
         StepwiseLoopRunner stepwiseLoopRunner,
         IServiceProvider serviceProvider,
         PluginCatalog pluginCatalog,
-        ModuleRouter moduleRouter)
+        ModuleRouter moduleRouter,
+        IEnumerable<IPluginExposurePolicy> exposurePolicies)
     {
         _kernelFactory = kernelFactory;
         _ctxAccessor = ctxAccessor;
@@ -62,6 +64,7 @@ public sealed class ChatPipeline
         _serviceProvider = serviceProvider;
         _pluginCatalog = pluginCatalog;
         _moduleRouter = moduleRouter;
+        _exposurePolicies = exposurePolicies;
     }
 
     public async Task<ChatCompletionResponse> HandleAsync(ChatCompletionRequest request, TSExecutionContext context, CancellationToken cancellationToken)
@@ -106,7 +109,11 @@ public sealed class ChatPipeline
         {
             if (!_pluginCatalog.ByModule.TryGetValue(module, out var types)) continue;
 
-            foreach (var t in types)
+            var policy = _exposurePolicies.First(p => p.CanHandle(module));
+            var selectedTypes = policy.Select(module, types, lastUserMessage);
+            if (selectedTypes.Count == 0) selectedTypes = types;
+
+            foreach (var t in selectedTypes)
             {
                 var plugin = _serviceProvider.GetRequiredService(t);
                 var pluginName = ToPluginName(t.Name);

@@ -12,11 +12,13 @@ public sealed class FilterCatalogService : IFilterCatalogService
 {
     private readonly IFilterValueHintsRepository _hintsRepository;
     private readonly IAppCache _cache;
+    private readonly IFilterCatalogRegistry _registry;
 
-    public FilterCatalogService(IFilterValueHintsRepository hintsRepository, IAppCache cache)
+    public FilterCatalogService(IFilterValueHintsRepository hintsRepository, IAppCache cache, IFilterCatalogRegistry registry)
     {
         _hintsRepository = hintsRepository;
         _cache = cache;
+        _registry = registry;
     }
 
     public async Task<object> GetCatalogAsync(TSExecutionContext context, string? resource, bool includeValues, CancellationToken cancellationToken)
@@ -29,11 +31,11 @@ public sealed class FilterCatalogService : IFilterCatalogService
                 kind = "filters.catalog.index.v1",
                 schemaVersion = 1,
                 generatedAtUtc = DateTimeOffset.UtcNow,
-                resources = FilterCatalogRegistry.ListResources()
+                resources = _registry.ListResources()
             };
         }
 
-        if (!FilterCatalogRegistry.TryGet(resource, out var catalog))
+        if (!_registry.TryGet(resource, out var catalog))
         {
             return new
             {

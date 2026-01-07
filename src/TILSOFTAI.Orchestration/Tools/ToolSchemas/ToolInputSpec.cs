@@ -1,6 +1,6 @@
 namespace TILSOFTAI.Orchestration.Tools.ToolSchemas;
 
-internal enum ToolArgType
+public enum ToolArgType
 {
     String,
     Int,
@@ -13,7 +13,7 @@ internal enum ToolArgType
     StringMap
 }
 
-internal sealed record ToolArgSpec(
+public sealed record ToolArgSpec(
     string Name,
     ToolArgType Type,
     bool Required = false,
@@ -21,7 +21,7 @@ internal sealed record ToolArgSpec(
     int? MinInt = null,
     int? MaxInt = null);
 
-internal sealed class ToolInputSpec
+public sealed class ToolInputSpec
 {
     public required string ToolName { get; set; }
     public bool SupportsPaging { get; set; }
