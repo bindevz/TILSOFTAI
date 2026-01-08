@@ -1,33 +1,71 @@
+using TILSOFTAI.Orchestration.Tools.FiltersCatalog;
 using TSExecutionContext = TILSOFTAI.Domain.ValueObjects.TSExecutionContext;
 
 namespace TILSOFTAI.Orchestration.SK.Planning;
 
-/// <summary>
-/// Selects which tool modules (plugins) should be exposed to the LLM for a given user message.
-/// "Level 2" strategy: expose only a small subset of modules per request.
-/// </summary>
 public sealed class ModuleRouter
 {
+    private readonly IReadOnlyDictionary<string, string[]> _moduleSignals;
+
+    public ModuleRouter(IFilterCatalogRegistry filterCatalogRegistry)
+    {
+        var dict = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["models"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "model", "mẫu", "mô hình", "sản phẩm", "sku", "attribute", "giá"
+            }
+        };
+
+        foreach (var resource in filterCatalogRegistry.ListResources())
+        {
+            if (!filterCatalogRegistry.TryGet(resource, out var cat)) continue;
+
+            var module = resource.Split('.', 2, StringSplitOptions.RemoveEmptyEntries)[0];
+            if (string.IsNullOrWhiteSpace(module)) continue;
+
+            if (!dict.TryGetValue(module, out var set))
+            {
+                set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                dict[module] = set;
+            }
+
+            set.Add(module);
+
+            foreach (var f in cat.SupportedFilters)
+            {
+                if (!string.IsNullOrWhiteSpace(f.Key)) set.Add(f.Key);
+                if (f.Aliases is { Length: > 0 })
+                {
+                    foreach (var a in f.Aliases)
+                    {
+                        if (!string.IsNullOrWhiteSpace(a)) set.Add(a);
+                    }
+                }
+            }
+        }
+
+        _moduleSignals = dict.ToDictionary(k => k.Key, v => v.Value.ToArray(), StringComparer.OrdinalIgnoreCase);
+    }
+
     public IReadOnlyCollection<string> SelectModules(string userText, TSExecutionContext context)
     {
         var modules = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var t = (userText ?? string.Empty).ToLowerInvariant();
+        var t = userText ?? string.Empty;
 
-        // Models / Products
-        if (ContainsAny(t, "model", "mẫu", "sản phẩm", "sku", "attribute", "giá"))
-            modules.Add("models");
-
-        // Analytics/reporting often needs multiple modules
-        if (ContainsAny(t, "báo cáo", "phân tích", "doanh số", "lợi nhuận", "kpi", "trend", "xu hướng"))
+        foreach (var kvp in _moduleSignals)
         {
-            modules.Add("models");
+            if (ContainsAny(t, kvp.Value))
+                modules.Add(kvp.Key);
         }
 
-        // If nothing matches, expose no tools (LLM will respond naturally per system prompt).
+        // Analytics/reporting often needs modules
+        if (ContainsAny(t, "báo cáo", "phân tích", "doanh số", "lợi nhuận", "kpi", "trend", "xu hướng"))
+            modules.Add("models");
+
         if (modules.Count == 0)
             return Array.Empty<string>();
 
-        //nếu có ít nhất 1 module business được chọn, thì add thêm common
         modules.Add("common");
         return modules;
     }

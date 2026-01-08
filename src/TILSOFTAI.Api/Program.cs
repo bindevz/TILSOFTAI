@@ -7,11 +7,15 @@ using TILSOFTAI.Infrastructure.Caching;
 using TILSOFTAI.Infrastructure.Data;
 using TILSOFTAI.Infrastructure.Observability;
 using TILSOFTAI.Orchestration.Chat;
+using TILSOFTAI.Orchestration.Chat.Localization;
 using TILSOFTAI.Orchestration.Llm;
 using TILSOFTAI.Orchestration.SK;
 using TILSOFTAI.Orchestration.SK.Plugins;
 using TILSOFTAI.Orchestration.Tools;
 using TILSOFTAI.Orchestration.Tools.ActionsCatalog;
+using Microsoft.Extensions.Options;
+using StackExchange.Redis;
+using TILSOFTAI.Orchestration.SK.Conversation;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -81,11 +85,51 @@ var lmStudioOptions = new LmStudioOptions();
 builder.Configuration.GetSection("LmStudio").Bind(lmStudioOptions);
 builder.Services.AddSingleton(lmStudioOptions);
 
+// Chat tuning (ver21)
+builder.Services.Configure<ChatTuningOptions>(builder.Configuration.GetSection("ChatTuning"));
+builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<ChatTuningOptions>>().Value);
+
+// Localization + multilingual heuristics (ver21)
+builder.Services.AddSingleton<ILanguageResolver, HeuristicLanguageResolver>();
+builder.Services.AddSingleton<IChatTextLocalizer, DefaultChatTextLocalizer>();
+builder.Services.AddSingleton<ChatTextPatterns>();
+
 //AI
 // SK infra
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.SkKernelFactory>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.ExecutionContextAccessor>();
 builder.Services.AddScoped<ToolInvoker>();
+
+// Conversation state (ver20)
+builder.Services.Configure<ConversationStateStoreOptions>(builder.Configuration.GetSection("ConversationStateStore"));
+builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<ConversationStateStoreOptions>>().Value);
+
+// Only register Redis client when explicitly enabled.
+builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
+{
+    var opt = sp.GetRequiredService<ConversationStateStoreOptions>();
+    if (!string.Equals(opt.Provider, "Redis", StringComparison.OrdinalIgnoreCase)
+        || string.IsNullOrWhiteSpace(opt.Redis.ConnectionString))
+        throw new InvalidOperationException("Redis is not enabled. Set ConversationStateStore:Provider=Redis and provide ConversationStateStore:Redis:ConnectionString.");
+
+    return ConnectionMultiplexer.Connect(opt.Redis.ConnectionString);
+});
+
+builder.Services.AddSingleton<IConversationStateStore>(sp =>
+{
+    var opt = sp.GetRequiredService<ConversationStateStoreOptions>();
+
+    if (string.Equals(opt.Provider, "Redis", StringComparison.OrdinalIgnoreCase)
+        && !string.IsNullOrWhiteSpace(opt.Redis.ConnectionString))
+    {
+        var mux = sp.GetRequiredService<IConnectionMultiplexer>();
+        return new RedisConversationStateStore(mux, opt);
+    }
+
+    return new InMemoryConversationStateStore(opt);
+});
+builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.Filters.IFilterPatchMerger,
+                             TILSOFTAI.Orchestration.Tools.Filters.FilterPatchMerger>();
 
 // Plugins per module
 builder.Services.AddSingleton(sp => new PluginCatalog(typeof(ChatPipeline).Assembly));
@@ -122,6 +166,7 @@ var app = builder.Build();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
 app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseMiddleware<ConversationIdMiddleware>();
 app.UseMiddleware<RateLimitMiddleware>();
 
 app.MapControllers();

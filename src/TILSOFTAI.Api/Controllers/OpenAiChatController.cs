@@ -68,6 +68,12 @@ public sealed class OpenAiChatController : ControllerBase
             ? correlationValue
             : httpContext.TraceIdentifier;
 
+        var conversationId = httpContext.Items.TryGetValue("X-Conversation-Id", out var conv) && conv is string convValue && !string.IsNullOrWhiteSpace(convValue)
+            ? convValue
+            : (httpContext.Request.Headers.TryGetValue("X-Conversation-Id", out var convHeader) && !string.IsNullOrWhiteSpace(convHeader)
+                ? convHeader.ToString()
+                : Guid.NewGuid().ToString("N"));
+
         // Enterprise telemetry fields
         var requestId = httpContext.TraceIdentifier;
         var traceId = System.Diagnostics.Activity.Current?.TraceId.ToString() ?? correlationId;
@@ -78,6 +84,7 @@ public sealed class OpenAiChatController : ControllerBase
             UserId = userId,
             Roles = roles,
             CorrelationId = correlationId,
+            ConversationId = conversationId,
             RequestId = requestId,
             TraceId = traceId
         };

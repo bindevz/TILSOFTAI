@@ -5,7 +5,9 @@ using Microsoft.Extensions.DependencyInjection;
 using System.Text.Json;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Orchestration.Llm;
+using TILSOFTAI.Orchestration.Chat.Localization;
 using TILSOFTAI.Orchestration.SK;
+using TILSOFTAI.Orchestration.SK.Conversation;
 using TILSOFTAI.Orchestration.SK.Governance;
 using TILSOFTAI.Orchestration.SK.Planning;
 using TILSOFTAI.Orchestration.SK.Plugins;
@@ -26,6 +28,11 @@ public sealed class ChatPipeline
     private readonly IAuditLogger _auditLogger;
     private readonly PlannerRouter _plannerRouter;
     private readonly StepwiseLoopRunner _stepwiseLoopRunner;
+    private readonly IConversationStateStore _conversationState;
+    private readonly ILanguageResolver _languageResolver;
+    private readonly IChatTextLocalizer _localizer;
+    private readonly ChatTextPatterns _patterns;
+    private readonly ChatTuningOptions _tuning;
     private readonly JsonSerializerOptions _serializerOptions = new(JsonSerializerDefaults.Web);
 
     private readonly IServiceProvider _serviceProvider;
@@ -46,10 +53,15 @@ public sealed class ChatPipeline
         IAuditLogger auditLogger,
         PlannerRouter plannerRouter,
         StepwiseLoopRunner stepwiseLoopRunner,
+        IConversationStateStore conversationState,
         IServiceProvider serviceProvider,
         PluginCatalog pluginCatalog,
         ModuleRouter moduleRouter,
-        IEnumerable<IPluginExposurePolicy> exposurePolicies)
+        IEnumerable<IPluginExposurePolicy> exposurePolicies,
+        ILanguageResolver languageResolver,
+        IChatTextLocalizer localizer,
+        ChatTextPatterns patterns,
+        ChatTuningOptions tuning)
     {
         _kernelFactory = kernelFactory;
         _ctxAccessor = ctxAccessor;
@@ -61,6 +73,11 @@ public sealed class ChatPipeline
         _auditLogger = auditLogger;
         _plannerRouter = plannerRouter;
         _stepwiseLoopRunner = stepwiseLoopRunner;
+        _conversationState = conversationState;
+        _languageResolver = languageResolver;
+        _localizer = localizer;
+        _patterns = patterns;
+        _tuning = tuning;
         _serviceProvider = serviceProvider;
         _pluginCatalog = pluginCatalog;
         _moduleRouter = moduleRouter;
@@ -91,26 +108,60 @@ public sealed class ChatPipeline
             string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase) &&
             !string.IsNullOrWhiteSpace(m.Content)).Content;
 
+        // Build a routing text that is robust for short follow-up questions like
+        // "mùa 24/25?" which rely on prior context (e.g., the previous user question).
+        var routingText = BuildRoutingText(incomingMessages, lastUserMessage);
+
+        // Conversation state helps route short follow-ups that omit the subject (e.g., "mùa 23/24?").
+        // It also allows server-side filter patching in ToolInvoker.
+        var conversationState = await _conversationState.TryGetAsync(context, cancellationToken);
+
+        // Allow user to reset filter context explicitly.
+        if (_patterns.IsResetFiltersIntent(lastUserMessage))
+        {
+            await _conversationState.ClearAsync(context, cancellationToken);
+            conversationState = null;
+        }
+
+        // Resolve response language for this turn (VI/EN) and persist it per conversation.
+        var lang = _languageResolver.Resolve(incomingMessages, conversationState);
+        conversationState ??= new ConversationState();
+        if (!string.Equals(conversationState.PreferredLanguage, lang.ToIsoCode(), StringComparison.OrdinalIgnoreCase))
+        {
+            conversationState.PreferredLanguage = lang.ToIsoCode();
+            await _conversationState.UpsertAsync(context, conversationState, cancellationToken);
+        }
+
         // 1) set context for plugins/filters
         _ctxAccessor.CircuitBreakerTripped = false;
         _ctxAccessor.CircuitBreakerReason = null;
         _ctxAccessor.Context = context;
-        _ctxAccessor.ConfirmedConfirmationId = TryExtractConfirmationId(lastUserMessage);
+        _ctxAccessor.ConfirmedConfirmationId = _patterns.TryExtractConfirmationId(lastUserMessage);
         _ctxAccessor.AutoInvokeCount = 0;
         _ctxAccessor.AutoInvokeSignatureCounts.Clear();
 
         // 2) build kernel
         var kernel = _kernelFactory.CreateKernel(request.Model);
 
-        // 3) register module plugins (bạn uncomment sau khi đã inject plugins theo module)
-        var modules = _moduleRouter.SelectModules(lastUserMessage, context);
+        // 3) register module plugins (module selection must consider short follow-ups)
+        var modules = _moduleRouter.SelectModules(routingText, context);
+
+        // If router cannot detect a module for a short follow-up, fall back to the previous module.
+        if (modules.Count == 0 && conversationState?.LastQuery is not null)
+        {
+            var module = conversationState.LastQuery.Resource.Split('.', 2, StringSplitOptions.RemoveEmptyEntries)[0];
+            if (!string.IsNullOrWhiteSpace(module))
+            {
+                modules = new[] { module, "common" };
+            }
+        }
 
         foreach (var module in modules)
         {
             if (!_pluginCatalog.ByModule.TryGetValue(module, out var types)) continue;
 
             var policy = _exposurePolicies.First(p => p.CanHandle(module));
-            var selectedTypes = policy.Select(module, types, lastUserMessage);
+            var selectedTypes = policy.Select(module, types, routingText);
             if (selectedTypes.Count == 0) selectedTypes = types;
 
             foreach (var t in selectedTypes)
@@ -127,7 +178,7 @@ public sealed class ChatPipeline
         var exposedFunctionCount = kernel.Plugins.SelectMany(p => p).Count();
         if (modules.Count > 0 && exposedFunctionCount == 0)
         {
-            var fallback = "Hiện tại tôi chưa được cập nhật tính năng này! Vui lòng liên hệ quản trị hệ thống để kích hoạt hoặc bổ sung tool phù hợp.";
+            var fallback = _localizer.Get(ChatTextKeys.FeatureNotAvailable, lang);
             return BuildResponse(request.Model ?? "TILSOFT-AI", fallback, incomingMessages);
         }
 
@@ -140,7 +191,26 @@ public sealed class ChatPipeline
 
         // 5) build chat history
         var history = new ChatHistory();
-        history.AddSystemMessage(BuildSystemPrompt());
+
+        history.AddSystemMessage(_localizer.Get(ChatTextKeys.SystemPrompt, lang));
+
+        // Provide a compact, machine-readable hint about the last query when the user turn is likely a follow-up.
+        // This improves tool selection and filter continuity without hard-coding filter keys.
+        if (conversationState?.LastQuery is not null && _patterns.IsLikelyFollowUp(lastUserMessage))
+        {
+            var hint = JsonSerializer.Serialize(new
+            {
+                kind = "tilsoft.conversation_state.v1",
+                lastQuery = new
+                {
+                    resource = conversationState.LastQuery.Resource,
+                    filters = conversationState.LastQuery.Filters,
+                    updatedAtUtc = conversationState.LastQuery.UpdatedAtUtc
+                }
+            }, _serializerOptions);
+
+            history.AddSystemMessage(_localizer.Get(ChatTextKeys.PreviousQueryHint, lang) + hint);
+        }
 
         foreach (var m in incomingMessages)
         {
@@ -148,6 +218,18 @@ public sealed class ChatPipeline
             if (string.Equals(m.Role, "system", StringComparison.OrdinalIgnoreCase)) continue;
 
             history.AddMessage(ToAuthorRole(m.Role), m.Content);
+        }
+
+        // If no tools are exposed, do NOT use tool-calling settings. Some models
+        // (LM Studio/open-source) may emit pseudo tool-call text in content when
+        // tools are unavailable. We force a plain chat completion instead.
+        if (exposedFunctionCount == 0)
+        {
+            var noToolsContent = await RespondWithoutToolsAsync(request.Model, history, lang, cancellationToken);
+            await _auditLogger.LogUserInputAsync(context, serializedRequest, cancellationToken);
+            var noToolsResponse = BuildResponse(request.Model ?? "TILSOFT-AI", noToolsContent, incomingMessages);
+            _tokenBudget.EnsureWithinBudget(noToolsResponse.Choices.First().Message.Content);
+            return noToolsResponse;
         }
 
         // 6) 01 model - internal routing
@@ -162,13 +244,13 @@ public sealed class ChatPipeline
             }
             else
             {
-                content = await GetAssistantAnswerAsync(request.Model, kernel, history, cancellationToken);
+                content = await GetAssistantAnswerAsync(request.Model, kernel, history, lang, cancellationToken);
             }
 
             // Defensive: if some path returns empty content, force a no-tools synthesis pass
             if (string.IsNullOrWhiteSpace(content))
             {
-                content = await SynthesizeWithoutToolsAsync(request.Model, history, cancellationToken);
+                content = await SynthesizeWithoutToolsAsync(request.Model, history, lang, cancellationToken);
             }
 
             // thấy marker / flag thì xóa content để ép synthesis
@@ -191,35 +273,18 @@ public sealed class ChatPipeline
         return response;
     }
 
-    private static string BuildSystemPrompt() => """
-        Bạn là trợ lý nghiệp vụ ERP.
-
-        Quy tắc công cụ (tools/functions):
-        - Kết quả tool luôn bọc theo envelope JSON: kind="tilsoft.envelope.v1" (schemaVersion>=2).
-          + Nếu ok=true: đọc field data (payload tool) và có thể dùng field evidence (registry) để tóm tắt nhanh.
-          + Nếu ok=false: đọc field error.code/error.message và field policy.decision/reasonCode; KHÔNG lặp lại cùng tool-call.
-          + Field source/telemetry giúp bạn giải thích nguồn số liệu (SQL/SP) và thời gian xử lý.
-        - Nếu không chắc filters hợp lệ cho nghiệp vụ, hãy gọi filters-catalog (resource tương ứng) trước khi gọi tool dữ liệu.
-        - Nếu không chắc thao tác ghi (create/update) cần những tham số nào, hãy gọi actions-catalog trước khi gọi tool prepare.
-        - Nếu yêu cầu CẦN dữ liệu nội bộ (giá, tồn kho, đơn hàng, khách hàng, model, doanh số...) thì PHẢI gọi tools để lấy evidence.
-        - Nếu câu hỏi là nghiệp vụ ERP và CẦN dữ liệu nội bộ nhưng hệ thống CHƯA có tool phù hợp, hãy trả lời đúng mẫu: "Hiện tại tôi chưa được cập nhật tính năng này!" (có thể kèm gợi ý liên hệ quản trị hệ thống).
-        - Nếu câu hỏi KHÔNG cần dữ liệu nội bộ (chào hỏi, giải thích khái niệm, hướng dẫn chung...), bạn được trả lời tự nhiên như một chatbot thông thường.
-        - Tuyệt đối không bịa dữ liệu nội bộ khi chưa có evidence từ tool.
-        - Chỉ được gọi các tools có trong danh sách hệ thống cung cấp. Tuyệt đối không tự bịa tool (ví dụ: functions.prepare).
-        - Thao tác ghi (create/update/commit) phải theo 2 bước: prepare -> yêu cầu xác nhận -> commit.
-        - Người dùng xác nhận bằng: XÁC NHẬN <confirmation_id>.
-        """;
-
     private async Task<string> GetAssistantAnswerAsync(
         string? requestedModel,
         Kernel kernel,
         ChatHistory history,
+        ChatLanguage lang,
         CancellationToken cancellationToken)
     {
         var chat = kernel.GetRequiredService<IChatCompletionService>();
         var settings = new OpenAIPromptExecutionSettings
         {
-            FunctionChoiceBehavior = FunctionChoiceBehavior.Auto()
+            FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(),
+            Temperature = (float)_tuning.ToolCallTemperature
         };
 
         var msg = await chat.GetChatMessageContentAsync(history, settings, kernel, cancellationToken);
@@ -230,31 +295,44 @@ public sealed class ChatPipeline
         // the client and avoids relying on any sentinel tokens.
         if (string.IsNullOrWhiteSpace(content))
         {
-            content = await SynthesizeWithoutToolsAsync(requestedModel, history, cancellationToken);
+            content = await SynthesizeWithoutToolsAsync(requestedModel, history, lang, cancellationToken);
         }
 
         return content;
     }
 
+    private async Task<string> RespondWithoutToolsAsync(
+        string? requestedModel,
+        ChatHistory history,
+        ChatLanguage lang,
+        CancellationToken cancellationToken)
+    {
+        // New kernel without plugins => no tools can be called.
+        // This avoids LM Studio/open-source models emitting pseudo tool-call text.
+        var kernel2 = _kernelFactory.CreateKernel(requestedModel);
+        var chat2 = kernel2.GetRequiredService<IChatCompletionService>();
+
+        // Add a short instruction: answer normally, do not attempt tool calling.
+        history.AddSystemMessage(_localizer.Get(ChatTextKeys.NoToolsMode, lang));
+
+        var msg2 = await chat2.GetChatMessageContentAsync(history, new OpenAIPromptExecutionSettings { Temperature = (float)_tuning.NoToolsTemperature }, kernel2, cancellationToken);
+        return (msg2.Content ?? string.Empty).Trim();
+    }
+
     private async Task<string> SynthesizeWithoutToolsAsync(
         string? requestedModel,
         ChatHistory history,
+        ChatLanguage lang,
         CancellationToken cancellationToken)
     {
         // Add a short instruction to produce a final answer based on evidence already in history.
-        history.AddSystemMessage("\"Bạn đã có đủ kết quả từ tools. Hãy trả lời trực tiếp, ngắn gọn, dựa trên evidence trong hội thoại. \" +\r\n  \"KHÔNG gọi tool. Không nhắc tới thông báo kỹ thuật nội bộ (circuit breaker / guardrails).\"");
+        history.AddSystemMessage(_localizer.Get(ChatTextKeys.SynthesizeNoTools, lang));
 
         // New kernel without plugins => no tools can be called.
         var kernel2 = _kernelFactory.CreateKernel(requestedModel);
         var chat2 = kernel2.GetRequiredService<IChatCompletionService>();
-        var msg2 = await chat2.GetChatMessageContentAsync(history, new OpenAIPromptExecutionSettings(), kernel2, cancellationToken);
+        var msg2 = await chat2.GetChatMessageContentAsync(history, new OpenAIPromptExecutionSettings { Temperature = (float)_tuning.SynthesisTemperature }, kernel2, cancellationToken);
         return (msg2.Content ?? string.Empty).Trim();
-    }
-
-    private static string? TryExtractConfirmationId(string text)
-    {
-        var m = System.Text.RegularExpressions.Regex.Match(text, @"(?i)\b(xác\s*nhận|confirm)\b[^a-f0-9]*([a-f0-9]{32})\b");
-        return m.Success ? m.Groups[2].Value : null;
     }
 
     private ChatCompletionResponse BuildFailureResponse(string error, string? model, IReadOnlyCollection<ChatCompletionMessage> promptMessages)
@@ -317,6 +395,43 @@ public sealed class ChatPipeline
         return string.Equals(role, "user", StringComparison.OrdinalIgnoreCase)
             || string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase)
             || string.Equals(role, "system", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string BuildRoutingText(IReadOnlyCollection<ChatCompletionMessage> messages, string lastUserMessage)
+    {
+        var last = (lastUserMessage ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(last)) return string.Empty;
+
+        var parts = new List<string>();
+
+        if (_patterns.IsLikelyFollowUp(last))
+        {
+            var prevUsers = messages.Reverse()
+                .Skip(1)
+                .Where(m => string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(m.Content))
+                .Take(3)
+                .Select(m => m.Content!)
+                .Reverse();
+
+            foreach (var u in prevUsers)
+                parts.Add(u);
+
+            var prevAssistant = messages.Reverse()
+                .FirstOrDefault(m => string.Equals(m.Role, "assistant", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(m.Content))
+                ?.Content;
+
+            if (!string.IsNullOrWhiteSpace(prevAssistant))
+                parts.Add(prevAssistant!);
+        }
+
+        parts.Add(last);
+        var routing = string.Join(" ", parts);
+
+        var max = _tuning.MaxRoutingContextChars <= 0 ? 1200 : _tuning.MaxRoutingContextChars;
+        if (routing.Length > max)
+            routing = routing[^max..];
+
+        return routing;
     }
 
     private static string ToPluginName(string typeName)
