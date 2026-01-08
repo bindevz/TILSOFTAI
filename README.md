@@ -2,10 +2,23 @@
 
 TILSOFTAI là nền tảng **AI Orchestrator cho ERP**: kết nối Open WebUI (OpenAI-compatible client) với LLM (LM Studio/OpenAI-compatible) và SQL Server thông qua API .NET 8, theo mô hình **Tool/Function Calling** với **guardrails chuẩn enterprise**.
 
-Phiên bản **ver13** tập trung vào 3 mục tiêu:
+Phiên bản **ver22** kế thừa ver21 và tập trung vào 3 mục tiêu:
 1) **Tách nghiệp vụ theo Module** (hiện tại migrate **Models**), Core không phình theo số lượng nghiệp vụ.
-2) **Chọn tool thông minh** để tránh overload (không load toàn bộ tools vào LLM mỗi lượt).
+2) **Chọn tool thông minh** để tránh overload (không load toàn bộ tools vào LLM mỗi lượt), đồng thời hỗ trợ **câu hỏi nối tiếp** (follow-up) không nhắc lại chủ thể.
 3) **Clean code**: loại bỏ cơ chế registry/dispatcher hardcode cũ, giảm điểm nghẽn khi mở rộng.
+
+ver21 bổ sung thêm:
+- **Đa ngôn ngữ (VI/EN)**: user chat tiếng Anh → trả lời tiếng Anh; chat tiếng Việt → trả lời tiếng Việt. Ngôn ngữ được suy luận theo lượt chat và được lưu theo ConversationId để hỗ trợ follow-up ngắn.
+- **Regex đa ngôn ngữ trong code** (ChatTextPatterns): follow-up, reset filters, extract confirmation id (VI/EN) — giảm phụ thuộc system prompt.
+- **Giảm phụ thuộc vào system prompt**: system prompt rút gọn, đồng thời thêm `ChatTuning` (temperature thấp) để giảm nhiễu/hallucination.
+
+ver20 đã bổ sung thêm:
+- **ConversationId do server generate** và echo về client qua response header `X-Conversation-Id`.
+- **Conversation state store**: lưu “last query” (tool + filters chuẩn hoá theo filters-catalog) để các câu follow-up có thể **patch/merge filters** mà không cần hard-code key.
+- **Redis store (tuỳ chọn)**: thay thế InMemory bằng Redis với sliding TTL cấu hình được và payload versioning.
+
+ver22 hotfix:
+- Sửa lỗi thiếu type `ChatCompletionMessage` do sai namespace trong `ILanguageResolver` (trỏ nhầm sang `TILSOFTAI.Orchestration.Llm`).
 
 ---
 
@@ -36,7 +49,15 @@ Phiên bản **ver13** tập trung vào 3 mục tiêu:
 6. Tool output bọc theo **Envelope v1** (schemaVersion >= 2) và trả về LLM.
 7. LLM tổng hợp câu trả lời dựa trên `data/evidence`.
 
-### 2.2. Tách nghiệp vụ theo Module (ver13)
+### 2.2. ConversationId (server-generated)
+API sử dụng header `X-Conversation-Id` để gom nhiều lượt chat về cùng một hội thoại.
+
+- Nếu client **không gửi** `X-Conversation-Id`: server tự generate và echo lại trong response header.
+- Nếu client **có gửi** `X-Conversation-Id`: server giữ nguyên và echo lại trong response header.
+
+Khuyến nghị: Open WebUI/client lưu `X-Conversation-Id` của response đầu tiên và gửi lại cho các request tiếp theo.
+
+### 2.3. Tách nghiệp vụ theo Module (ver13)
 Mục tiêu: tránh việc mọi tool/logic bị dồn vào các lớp trung tâm (ví dụ `ToolDispatcher`).
 
 - **Core (Orchestration)** giữ các thành phần dùng chung:
@@ -84,10 +105,21 @@ Chức năng:
 
 ## 4. Cơ chế chọn tool thông minh (tránh overload)
 
-Ở quy mô lớn, không nên expose toàn bộ tools cho LLM mỗi lượt. Ver13 triển khai 2 lớp chọn lọc:
+Ở quy mô lớn, không nên expose toàn bộ tools cho LLM mỗi lượt. Ver20 triển khai 2 lớp chọn lọc (và bổ sung state cho follow-up):
 
-### 4.1. Level 2: ModuleRouter (chọn module theo message)
-`ModuleRouter.SelectModules(userMessage, context)` trả về danh sách module liên quan.
+### 4.1. Level 2: ModuleRouter (chọn module theo message, hỗ trợ follow-up)
+
+Trong thực tế hội thoại ERP, người dùng thường hỏi nối tiếp rất ngắn (vd: "mùa 24/25?", "còn màu đỏ?", "thế 2023?") và không lặp lại chủ thể.
+
+Ver20 bổ sung bước **Context-aware routing text** trong `ChatPipeline`:
+- Nếu câu user cuối là follow-up ngắn, hệ thống ghép thêm 1–2 turn trước (user/assistant) để routing không bị rỗng.
+- Mục tiêu: vẫn chọn đúng module/tool pack cho câu hỏi nối tiếp.
+
+Sau đó `ModuleRouter.SelectModules(routingText, context)` trả về danh sách module liên quan.
+
+Ver20 bổ sung thêm **conversation state fallback**:
+- Mỗi khi tool READ chạy thành công, hệ thống lưu `lastQuery` (tool + filters đã canonicalize theo filters-catalog) theo `X-Conversation-Id`.
+- Nếu một câu follow-up quá ngắn khiến router không nhận ra module, hệ thống fallback về module của `lastQuery` để vẫn expose đúng tool-pack.
 
 Ví dụ:
 - Người dùng nói về **model/sản phẩm/giá/attribute** → chọn module `models`.
@@ -95,8 +127,53 @@ Ví dụ:
 
 Nếu không match module nào → expose **0 tool** (LLM trả lời tự nhiên theo system prompt, không được bịa tool).
 
+Ngoài ra, nếu **0 tool** được expose thì hệ thống chạy completion ở chế độ **không tools** để tránh một số model open-source (LM Studio) sinh "pseudo tool-call" trong content.
+
+Ver20 thêm một tầng bảo vệ cho follow-up:
+- Khi router không match module (do câu hỏi quá ngắn), hệ thống fallback theo **lastQuery.resource** từ ConversationStateStore.
+- Khi model gọi tool mà chỉ truyền “delta filters”, server sẽ **patch/merge** filters với lastQuery dựa trên **filters-catalog** (không hard-code key).
+
+#### 4.1.1. Cấu hình ConversationStateStore (InMemory/Redis)
+
+Mặc định cấu hình dùng **InMemoryConversationStateStore** phù hợp chạy đơn node/local. Khi triển khai multi-node, bật Redis để state được chia sẻ giữa các instance.
+
+Cấu hình trong `appsettings.json`:
+
+```json
+"ConversationStateStore": {
+  "Provider": "InMemory", // hoặc "Redis"
+  "Ttl": "00:30:00",
+  "SlidingTtlEnabled": true,
+  "PayloadVersion": 1,
+  "KeyPrefix": "tilsoftai:conv:",
+  "Redis": {
+    "ConnectionString": "localhost:6379,abortConnect=false",
+    "Database": -1
+  }
+}
+```
+
+Ghi chú:
+- **SlidingTtlEnabled**: mỗi lần đọc sẽ refresh TTL (giống “sliding session”).
+- **PayloadVersion**: wrapper version để bạn có thể nâng schema state về sau mà vẫn tương thích.
+- Khi `Provider=Redis` nhưng thiếu `Redis.ConnectionString`, API sẽ báo cấu hình thiếu khi service Redis được resolve.
+
+#### 4.1.2. Cấu hình ChatTuning (ver21)
+
+`ChatTuning` điều khiển các tham số generation để giảm phụ thuộc vào prompt và giảm hallucination (khuyến nghị để temperature thấp):
+
+```json
+"ChatTuning": {
+  "ToolCallTemperature": 0.1,
+  "SynthesisTemperature": 0.2,
+  "NoToolsTemperature": 0.3,
+  "MaxRoutingContextChars": 1200
+}
+```
+
+
 ### 4.2. Level 3: Plugin Exposure Policy (chọn tool pack trong module)
-Trong 1 module có thể có nhiều tool. Ver13 chia plugin theo **tool packs** và chỉ expose pack cần thiết.
+Trong 1 module có thể có nhiều tool. Ver20 chia plugin theo **tool packs** và chỉ expose pack cần thiết.
 
 - Interface: `IPluginExposurePolicy`
 - `ModelsPluginExposurePolicy` chọn pack dựa trên heuristic:
@@ -109,7 +186,7 @@ Kết quả: giảm số function exposures, giảm token overhead, tăng ổn �
 
 ---
 
-## 5. Modules hiện có (ver13)
+## 5. Modules hiện có (ver19)
 
 ### 5.1. Common module
 - `filters.catalog`
