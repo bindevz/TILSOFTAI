@@ -1,13 +1,10 @@
 using Microsoft.EntityFrameworkCore;
-using TILSOFTAI.Domain.Entities;
 using TILSOFTAI.Domain.Interfaces;
 
 namespace TILSOFTAI.Infrastructure.Data;
 
 public sealed class SqlServerDbContext : DbContext, IUnitOfWork
 {
-    public DbSet<Model> Models => Set<Model>();
-    public DbSet<ModelAttribute> ModelAttributes => Set<ModelAttribute>();
     public DbSet<ConfirmationPlanEntity> ConfirmationPlans => Set<ConfirmationPlanEntity>();
 
     public SqlServerDbContext(DbContextOptions<SqlServerDbContext> options) : base(options)

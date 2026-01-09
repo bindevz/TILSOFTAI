@@ -3,6 +3,7 @@ using System.Text.Json;
 using Json.Schema;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using TILSOFTAI.Orchestration.Contracts;
 using TILSOFTAI.Orchestration.Llm;
 
 namespace TILSOFTAI.Orchestration.Contracts.Validation;
@@ -76,8 +77,12 @@ public sealed class ResponseSchemaValidator : IResponseSchemaValidator
             return;
 
         // We rely on (kind, schemaVersion) embedded in the payload.
+        // NOTE: JsonElement/JsonDocument lifetimes are a common pitfall.
+        // Tool handlers (or other layers) may accidentally return a JsonElement backed by a disposed JsonDocument.
+        // Also, Json.Schema may keep references to the instance element while producing EvaluationResults.
+        // Therefore we always materialize a fresh, self-owned JsonElement via Clone().
         using var doc = JsonDocument.Parse(JsonSerializer.Serialize(payload, JsonSerializerOptions.Default));
-        var root = doc.RootElement;
+        var root = doc.RootElement.Clone();
         if (root.ValueKind != JsonValueKind.Object)
             return;
 
@@ -151,8 +156,12 @@ public sealed class ResponseSchemaValidator : IResponseSchemaValidator
 
             try
             {
+                // IMPORTANT: JsonSchema.Build() may keep references to the provided JsonElement.
+                // If that element is backed by a disposed JsonDocument, schema evaluation can throw ObjectDisposedException.
+                // We therefore Clone() the schema root so its underlying document remains alive independently.
                 using var schemaDoc = JsonDocument.Parse(File.ReadAllText(file));
-                var schema = JsonSchema.Build(schemaDoc.RootElement, _buildOptions);
+                var schemaRoot = schemaDoc.RootElement.Clone();
+                var schema = JsonSchema.Build(schemaRoot, _buildOptions);
 
                 // Register alias URI to support relative $ref that includes filename suffix.
                 // Example: $id = tilsoftai://contracts/models.search.v2

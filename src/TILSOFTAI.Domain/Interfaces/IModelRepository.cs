@@ -1,4 +1,3 @@
-using TILSOFTAI.Domain.Entities;
 using TILSOFTAI.Domain.ValueObjects;
 
 namespace TILSOFTAI.Domain.Interfaces;
@@ -36,8 +35,5 @@ public interface IModelRepository
         int modelId,
         bool includeConstraints,
         CancellationToken cancellationToken);
-    Task<Model?> GetAsync(string tenantId, Guid id, CancellationToken cancellationToken);
-    Task<IReadOnlyCollection<ModelAttribute>> ListAttributesAsync(string tenantId, Guid modelId, CancellationToken cancellationToken);
     Task<PriceAnalysis> AnalyzePriceAsync(string tenantId, Guid modelId, CancellationToken cancellationToken);
-    Task CreateAsync(Model model, CancellationToken cancellationToken);
 }

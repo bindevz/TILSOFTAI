@@ -19,24 +19,24 @@ public sealed class ModelsCreateCommitToolHandler : IToolHandler
     public async Task<ToolDispatchResult> HandleAsync(object intent, TSExecutionContext context, CancellationToken cancellationToken)
     {
         var dyn = (DynamicToolIntent)intent;
-        var confirmationId = dyn.GetStringRequired("confirmationId");
-        var created = await _modelsService.CommitCreateAsync(confirmationId, context, cancellationToken);
+        //var confirmationId = dyn.GetStringRequired("confirmationId");
+        //var created = await _modelsService.CommitCreateAsync(confirmationId, context, cancellationToken);
 
-        var payload = new
-        {
-            kind = "models.create.commit.v1",
-            schemaVersion = 1,
-            generatedAtUtc = DateTimeOffset.UtcNow,
-            resource = "models.create.commit",
-            data = new
-            {
-                created.ModelID,
-                created.ModelUD,
-                created.ModelNM
-            },
-            warnings = Array.Empty<string>()
-        };
-
+        //var payload = new
+        //{
+        //    kind = "models.create.commit.v1",
+        //    schemaVersion = 1,
+        //    generatedAtUtc = DateTimeOffset.UtcNow,
+        //    resource = "models.create.commit",
+        //    data = new
+        //    {
+        //        created.ModelID,
+        //        created.ModelUD,
+        //        created.ModelNM
+        //    },
+        //    warnings = Array.Empty<string>()
+        //};
+        var payload = new { };
         return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateSuccess("models.create.commit executed", payload));
     }
 }

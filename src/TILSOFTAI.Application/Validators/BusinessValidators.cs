@@ -1,7 +1,5 @@
 using System.Security;
 using System.Text.RegularExpressions;
-using TILSOFTAI.Domain.Entities;
-using TILSOFTAI.Domain.ValueObjects;
 using TSExecutionContext = TILSOFTAI.Domain.ValueObjects.TSExecutionContext;
 
 namespace TILSOFTAI.Application.Validators;

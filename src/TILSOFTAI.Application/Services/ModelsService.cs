@@ -1,7 +1,6 @@
 ﻿using System.Globalization;
 using System.Text.Json;
 using TILSOFTAI.Application.Validators;
-using TILSOFTAI.Domain.Entities;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Domain.ValueObjects;
 using TSExecutionContext = TILSOFTAI.Domain.ValueObjects.TSExecutionContext;
@@ -79,16 +78,6 @@ public sealed class ModelsService
         return _modelRepository.GetOptionsAsync(context.TenantId, modelId, includeConstraints, cancellationToken);
     }
 
-    public Task<Model?> GetAsync(Guid id, TSExecutionContext context, CancellationToken cancellationToken)
-    {
-        return _modelRepository.GetAsync(context.TenantId, id, cancellationToken);
-    }
-
-    public Task<IReadOnlyCollection<ModelAttribute>> ListAttributesAsync(Guid modelId, TSExecutionContext context, CancellationToken cancellationToken)
-    {
-        return _modelRepository.ListAttributesAsync(context.TenantId, modelId, cancellationToken);
-    }
-
     public Task<PriceAnalysis> AnalyzePriceAsync(Guid modelId, TSExecutionContext context, CancellationToken cancellationToken)
     {
         return _modelRepository.AnalyzePriceAsync(context.TenantId, modelId, cancellationToken);
@@ -131,39 +120,39 @@ public sealed class ModelsService
         };
     }
 
-    public async Task<Model> CommitCreateAsync(string confirmationId, TSExecutionContext context, CancellationToken cancellationToken)
-    {
-        var plan = await _planService.ConsumePlanAsync(confirmationId, "models.create", context, cancellationToken);
-        var name = plan.Data["name"];
-        var category = plan.Data["category"];
-        var basePrice = decimal.Parse(plan.Data["basePrice"], NumberStyles.Number, CultureInfo.InvariantCulture);
-        var attributes = DeserializeAttributes(plan.Data["attributes"]);
+    //public async Task<Model> CommitCreateAsync(string confirmationId, TSExecutionContext context, CancellationToken cancellationToken)
+    //{
+    //    var plan = await _planService.ConsumePlanAsync(confirmationId, "models.create", context, cancellationToken);
+    //    var name = plan.Data["name"];
+    //    var category = plan.Data["category"];
+    //    var basePrice = decimal.Parse(plan.Data["basePrice"], NumberStyles.Number, CultureInfo.InvariantCulture);
+    //    var attributes = DeserializeAttributes(plan.Data["attributes"]);
 
-        var model = new Model
-        {
-            //Id = Guid.NewGuid(),
-            //TenantId = context.TenantId,
-            //Name = name,
-            //Category = category,
-            //BasePrice = basePrice,
-            //CreatedAt = DateTimeOffset.UtcNow,
-            //UpdatedAt = DateTimeOffset.UtcNow,
-            //Attributes = attributes.Select(kvp => new ModelAttribute
-            //{
-            //    Id = Guid.NewGuid(),
-            //    Name = kvp.Key,
-            //    Value = kvp.Value
-            //}).ToList()
-        };
+    //    var model = new Model
+    //    {
+    //        //Id = Guid.NewGuid(),
+    //        //TenantId = context.TenantId,
+    //        //Name = name,
+    //        //Category = category,
+    //        //BasePrice = basePrice,
+    //        //CreatedAt = DateTimeOffset.UtcNow,
+    //        //UpdatedAt = DateTimeOffset.UtcNow,
+    //        //Attributes = attributes.Select(kvp => new ModelAttribute
+    //        //{
+    //        //    Id = Guid.NewGuid(),
+    //        //    Name = kvp.Key,
+    //        //    Value = kvp.Value
+    //        //}).ToList()
+    //    };
 
-        await _unitOfWork.ExecuteTransactionalAsync(async ct =>
-        {
-            await _modelRepository.CreateAsync(model, ct);
-        }, cancellationToken);
+    //    await _unitOfWork.ExecuteTransactionalAsync(async ct =>
+    //    {
+    //        await _modelRepository.CreateAsync(model, ct);
+    //    }, cancellationToken);
 
-        await _auditLogger.LogToolExecutionAsync(context, "models.create.commit", new { confirmationId }, new { model.ModelID, model.ModelUD, model.ModelNM }, cancellationToken);
-        return model;
-    }
+    //    await _auditLogger.LogToolExecutionAsync(context, "models.create.commit", new { confirmationId }, new { model.ModelID, model.ModelUD, model.ModelNM }, cancellationToken);
+    //    return model;
+    //}
 
     private static string NormalizeAttributeName(string key) => key.Trim().ToUpperInvariant();
 

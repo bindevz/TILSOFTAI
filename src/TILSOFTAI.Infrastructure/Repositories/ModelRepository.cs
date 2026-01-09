@@ -1,7 +1,6 @@
 ﻿using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using System.Data;
-using TILSOFTAI.Domain.Entities;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Domain.ValueObjects;
 using TILSOFTAI.Infrastructure.Data;
@@ -326,39 +325,14 @@ public sealed class ModelRepository : IModelRepository
         }
     }
 
-    public Task<Model?> GetAsync(string tenantId, Guid id, CancellationToken cancellationToken)
-    {
-        return _dbContext.Models
-            .AsNoTracking()
-            .Include(m => m.Attributes)
-            .FirstOrDefaultAsync(m => m.TenantId == tenantId && m.ModelID == 1, cancellationToken);
-    }
-
-    public async Task<IReadOnlyCollection<ModelAttribute>> ListAttributesAsync(string tenantId, Guid modelId, CancellationToken cancellationToken)
-    {
-        return await _dbContext.ModelAttributes
-            .AsNoTracking()
-            .Where(a => a.ModelId == modelId && a.Model.TenantId == tenantId)
-            .OrderBy(a => a.Name)
-            .ToListAsync(cancellationToken);
-    }
 
     public async Task<PriceAnalysis> AnalyzePriceAsync(string tenantId, Guid modelId, CancellationToken cancellationToken)
     {
-        var model = await _dbContext.Models
-            .AsNoTracking()
-            .Include(m => m.Attributes)
-            .FirstOrDefaultAsync(m => m.ModelID == 1 && m.TenantId == tenantId, cancellationToken)
-            ?? throw new KeyNotFoundException("Model not found.");
-
-        var adjustment = model.Attributes.Count * 5m;
-        var final = model.BasePrice + adjustment;
-        return new PriceAnalysis(model.BasePrice, adjustment, final);
-    }
-
-    public async Task CreateAsync(Model model, CancellationToken cancellationToken)
-    {
-        await _dbContext.Models.AddAsync(model, cancellationToken);
+        var model = new Guid();
+        var basePrice = 0;
+        var adjustment = 1 * 5m;
+        var final = 1 + adjustment;
+        return new PriceAnalysis(basePrice, adjustment, final);
     }
 
     private static int SafeOrdinal(SqlDataReader reader, string name)
