@@ -3,6 +3,7 @@ using System.Text.Json;
 using Json.Schema;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using TILSOFTAI.Orchestration.Llm;
 
 namespace TILSOFTAI.Orchestration.Contracts.Validation;
 
@@ -237,7 +238,9 @@ public sealed class ResponseSchemaValidator : IResponseSchemaValidator
             {
                 foreach (var kv in node.Errors)
                 {
-                    var loc = node.InstanceLocation?.ToString() ?? string.Empty;
+                    // JsonSchema.Net uses JsonPointer (a struct) for instance locations; it is never null.
+                    // The default pointer string is empty, so we can safely call ToString().
+                    var loc = node.InstanceLocation.ToString();
                     var msg = string.IsNullOrWhiteSpace(loc)
                         ? $"{kv.Key}: {kv.Value}"
                         : $"{loc}: {kv.Key}: {kv.Value}";

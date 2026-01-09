@@ -1,3 +1,5 @@
+using TILSOFTAI.Orchestration.Llm;
+
 namespace TILSOFTAI.Orchestration.Contracts.Validation;
 
 public interface IResponseSchemaValidator
