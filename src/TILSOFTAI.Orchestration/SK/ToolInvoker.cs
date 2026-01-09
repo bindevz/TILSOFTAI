@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using TILSOFTAI.Application.Permissions;
 using TILSOFTAI.Orchestration.Contracts;
+using TILSOFTAI.Orchestration.Contracts.Validation;
 using TILSOFTAI.Orchestration.Llm;
 using TILSOFTAI.Orchestration.SK.Conversation;
 using TILSOFTAI.Orchestration.Tools;
@@ -19,6 +20,7 @@ public sealed class ToolInvoker
     private readonly ExecutionContextAccessor _ctx;
     private readonly IConversationStateStore _conversationState;
     private readonly IFilterPatchMerger _filterPatchMerger;
+    private readonly IResponseSchemaValidator _responseSchemaValidator;
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
 
     public ToolInvoker(
@@ -27,7 +29,8 @@ public sealed class ToolInvoker
         RbacService rbac,
         ExecutionContextAccessor ctx,
         IConversationStateStore conversationState,
-        IFilterPatchMerger filterPatchMerger)
+        IFilterPatchMerger filterPatchMerger,
+        IResponseSchemaValidator responseSchemaValidator)
     {
         _registry = registry;
         _dispatcher = dispatcher;
@@ -35,6 +38,7 @@ public sealed class ToolInvoker
         _ctx = ctx;
         _conversationState = conversationState;
         _filterPatchMerger = filterPatchMerger;
+        _responseSchemaValidator = responseSchemaValidator;
     }
 
     public async Task<object> ExecuteAsync(string toolName, object argsObj, CancellationToken ct)
@@ -117,6 +121,10 @@ public sealed class ToolInvoker
                     source: source,
                     evidence: evidence);
             }
+
+            // Runtime response contract validation (ver25)
+            // Ensures tool handlers cannot drift away from governance/contracts.
+            _responseSchemaValidator.ValidateOrThrow(dispatchResult.Result.Data, toolName);
 
             // Update conversation state for follow-up turns (only for successful READ queries)
             await TryUpdateConversationStateAsync(toolName, normalizedIntent, requiresWrite, ct);

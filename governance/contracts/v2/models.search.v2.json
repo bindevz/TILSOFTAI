@@ -1,0 +1,24 @@
+{
+  "kind": "models.search.v2",
+  "schemaVersion": 2,
+  "generatedAtUtc": "2026-01-09T00:00:00Z",
+  "resource": "models.search",
+  "filtersApplied": {},
+  "rejectedFilters": [],
+  "data": {
+    "totalCount": 0,
+    "pageNumber": 1,
+    "pageSize": 50,
+    "table": {
+      "columns": [
+        {
+          "name": "modelId",
+          "type": 1
+        }
+      ],
+      "rows": [],
+      "totalCount": 0
+    }
+  },
+  "warnings": []
+}

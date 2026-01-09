@@ -22,16 +22,25 @@ public sealed class ModelsAttributesListToolHandler : IToolHandler
         var modelId = dyn.GetGuid("modelId");
         var attrs = await _modelsService.ListAttributesAsync(modelId, context, cancellationToken);
 
+        var table = new TabularData(
+            Columns: new[]
+            {
+                new TabularColumn("name", TabularType.String),
+                new TabularColumn("value", TabularType.String)
+            },
+            Rows: attrs.Select(a => new object?[] { a.Name, a.Value }).ToArray(),
+            TotalCount: attrs.Count);
+
         var payload = new
         {
-            kind = "models.attributes.list.v1",
-            schemaVersion = 1,
+            kind = "models.attributes.list.v2",
+            schemaVersion = 2,
             generatedAtUtc = DateTimeOffset.UtcNow,
             resource = "models.attributes.list",
             data = new
             {
                 modelId,
-                attributes = attrs.Select(a => new { a.Name, a.Value })
+                table
             },
             warnings = Array.Empty<string>()
         };

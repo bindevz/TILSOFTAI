@@ -8,6 +8,10 @@ public enum ToolArgType
     Guid,
     Decimal,
     /// <summary>
+    /// Arbitrary JSON value (object/array/scalar). Parsed as JsonElement (cloned).
+    /// </summary>
+    Json,
+    /// <summary>
     /// JSON object where values are strings. Parsed as Dictionary&lt;string,string&gt;.
     /// </summary>
     StringMap

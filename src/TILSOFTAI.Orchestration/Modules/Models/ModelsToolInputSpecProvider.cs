@@ -18,7 +18,7 @@ public sealed class ModelsToolInputSpecProvider : IToolInputSpecProvider
         yield return BuildModelsCount();
         yield return BuildModelsStats();
         yield return BuildModelsOptions();
-        yield return BuildModelsGuidOnly("models.get");
+        yield return BuildModelsGet();
         yield return BuildModelsGuidOnly("models.attributes.list");
         yield return BuildModelsGuidOnly("models.price.analyze");
         yield return BuildModelsCreatePrepare();
@@ -58,6 +58,15 @@ public sealed class ModelsToolInputSpecProvider : IToolInputSpecProvider
         spec.AllowedFilterKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         spec.Args["modelId"] = new ToolArgSpec("modelId", ToolArgType.Int, Required: true, MinInt: 1, MaxInt: int.MaxValue);
         spec.Args["includeConstraints"] = new ToolArgSpec("includeConstraints", ToolArgType.Bool, Required: false, Default: true);
+        return spec;
+    }
+
+    
+    private ToolInputSpec BuildModelsGet()
+    {
+        var spec = Default("models.get");
+        spec.AllowedFilterKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        spec.Args["modelId"] = new ToolArgSpec("modelId", ToolArgType.Int, Required: true, MinInt: 1, MaxInt: int.MaxValue);
         return spec;
     }
 

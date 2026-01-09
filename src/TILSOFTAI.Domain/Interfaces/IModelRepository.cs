@@ -5,7 +5,19 @@ namespace TILSOFTAI.Domain.Interfaces;
 
 public interface IModelRepository
 {
-    Task<PagedResult<Model>> SearchAsync(string tenantId, string? rangeName, string? modelCode, string? modelName, string? season, string? collection, int page, int size, CancellationToken cancellationToken);
+    /// <summary>
+    /// Returns raw tabular rows for analytics. This avoids mapping to domain entities/DTOs.
+    /// </summary>
+    Task<TabularData> SearchTabularAsync(
+        string tenantId,
+        string? rangeName,
+        string? modelCode,
+        string? modelName,
+        string? season,
+        string? collection,
+        int page,
+        int size,
+        CancellationToken cancellationToken);
 
     // Phase 2 (enterprise): pre-aggregated statistics for professional, guided answers.
     Task<ModelsStatsResult> GetStatsAsync(

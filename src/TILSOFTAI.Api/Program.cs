@@ -23,11 +23,18 @@ builder.Services.AddSingleton<TILSOFTAI.Application.Permissions.RbacService>();
 builder.Services.AddSingleton<TILSOFTAI.Infrastructure.Caching.AppMemoryCache>();
 builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAppCache>(sp => sp.GetRequiredService<TILSOFTAI.Infrastructure.Caching.AppMemoryCache>());
 
+// Atomic Data Engine datasets (ver23)
+builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAnalyticsDatasetStore, TILSOFTAI.Infrastructure.Caching.InMemoryAnalyticsDatasetStore>();
+
+
+// Analytics data sources (bounded raw fetchers)
+builder.Services.AddScoped<TILSOFTAI.Application.Analytics.IAnalyticsDataSource, TILSOFTAI.Application.Analytics.Sources.ModelsAnalyticsDataSource>();
 // ------------------------
 // Tool modularity (ver13)
 // ------------------------
 // Catalogs contributed by modules
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.FiltersCatalog.IFilterCatalogProvider, TILSOFTAI.Orchestration.Modules.Models.ModelsFilterCatalogProvider>();
+builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.FiltersCatalog.IFilterCatalogProvider, TILSOFTAI.Orchestration.Modules.Analytics.AnalyticsFilterCatalogProvider>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.FiltersCatalog.IFilterCatalogRegistry, TILSOFTAI.Orchestration.Tools.FiltersCatalog.FilterCatalogRegistry>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.Modularity.IFilterCanonicalizer, TILSOFTAI.Orchestration.Tools.Modularity.FilterCanonicalizer>();
 
@@ -37,12 +44,14 @@ builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ActionsCatalog.IActi
 // Tool schemas contributed by modules
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolSchemas.IToolInputSpecProvider, TILSOFTAI.Orchestration.Modules.Common.CommonToolInputSpecProvider>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolSchemas.IToolInputSpecProvider, TILSOFTAI.Orchestration.Modules.Models.ModelsToolInputSpecProvider>();
+builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolSchemas.IToolInputSpecProvider, TILSOFTAI.Orchestration.Modules.Analytics.AnalyticsToolInputSpecProvider>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolSchemas.ToolInputSpecCatalog>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolSchemas.DynamicIntentValidator>();
 
 // Tool whitelist definitions contributed by modules
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.IToolRegistrationProvider, TILSOFTAI.Orchestration.Modules.Common.CommonToolRegistrationProvider>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.IToolRegistrationProvider, TILSOFTAI.Orchestration.Modules.Models.ModelsToolRegistrationProvider>();
+builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.IToolRegistrationProvider, TILSOFTAI.Orchestration.Modules.Analytics.AnalyticsToolRegistrationProvider>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolRegistry>();
 
 // Handlers (one handler per tool)
@@ -59,12 +68,25 @@ builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler, TILSOFTAI.Orchestration.Modules.Models.Handlers.ModelsCreatePrepareToolHandler>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler, TILSOFTAI.Orchestration.Modules.Models.Handlers.ModelsCreateCommitToolHandler>();
 
+// Analytics (Atomic Data Engine) tools
+builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler, TILSOFTAI.Orchestration.Modules.Analytics.Handlers.AnalyticsDatasetCreateToolHandler>();
+builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler, TILSOFTAI.Orchestration.Modules.Analytics.Handlers.AnalyticsRunToolHandler>();
+
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.ToolDispatcher>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Llm.TokenBudget>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Chat.ChatPipeline>();
 builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAuditLogger, TILSOFTAI.Infrastructure.Observability.AuditLogger>();
 builder.Services.AddScoped<TILSOFTAI.Domain.Interfaces.IConfirmationPlanStore, TILSOFTAI.Infrastructure.Data.SqlConfirmationPlanStore>();
 builder.Services.AddTilsoftaiAutoRegistrations();
+
+// Runtime response schema validation (ver25)
+builder.Services.Configure<TILSOFTAI.Orchestration.Contracts.Validation.ResponseSchemaValidationOptions>(
+    builder.Configuration.GetSection("ContractValidation"));
+builder.Services.AddSingleton(sp => sp
+    .GetRequiredService<IOptions<TILSOFTAI.Orchestration.Contracts.Validation.ResponseSchemaValidationOptions>>()
+    .Value);
+builder.Services.AddSingleton<TILSOFTAI.Orchestration.Contracts.Validation.IResponseSchemaValidator,
+    TILSOFTAI.Orchestration.Contracts.Validation.ResponseSchemaValidator>();
 
 
 var lmStudioOptions = new TILSOFTAI.Orchestration.Llm.LmStudioOptions();
@@ -85,6 +107,14 @@ builder.Services.AddSingleton<TILSOFTAI.Orchestration.Chat.Localization.ChatText
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.SkKernelFactory>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.ExecutionContextAccessor>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.ToolInvoker>();
+
+// Runtime response contract validation (ver25)
+builder.Services.Configure<TILSOFTAI.Orchestration.Contracts.Validation.ResponseSchemaValidationOptions>(
+    builder.Configuration.GetSection("ContractValidation"));
+builder.Services.AddSingleton(sp =>
+    sp.GetRequiredService<IOptions<TILSOFTAI.Orchestration.Contracts.Validation.ResponseSchemaValidationOptions>>().Value);
+builder.Services.AddSingleton<TILSOFTAI.Orchestration.Contracts.Validation.IResponseSchemaValidator,
+    TILSOFTAI.Orchestration.Contracts.Validation.ResponseSchemaValidator>();
 
 // Conversation state (ver20)
 builder.Services.Configure<TILSOFTAI.Orchestration.SK.Conversation.ConversationStateStoreOptions>(builder.Configuration.GetSection("ConversationStateStore"));

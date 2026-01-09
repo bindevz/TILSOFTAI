@@ -186,6 +186,11 @@ public sealed class DynamicIntentValidator
 
                 error = $"{argSpec.Name} must be an object of string values.";
                 return false;
+
+            case ToolArgType.Json:
+                // Keep the original JSON payload (cloned) for module-specific validation.
+                value = v.Clone();
+                return true;
         }
 
         error = $"Unsupported argument type for {argSpec.Name}.";

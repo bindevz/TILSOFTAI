@@ -30,7 +30,7 @@ public sealed class ModelsCountToolHandler : IToolHandler
         }
 
         // Reuse the search stored procedure: request 1 row, read TotalCount.
-        var result = await _modelsService.SearchAsync(
+        var table = await _modelsService.SearchTabularAsync(
             context.TenantId,
             filtersApplied.GetValueOrDefault("rangeName"),
             filtersApplied.GetValueOrDefault("modelCode"),
@@ -42,6 +42,8 @@ public sealed class ModelsCountToolHandler : IToolHandler
             context: context,
             cancellationToken: cancellationToken);
 
+        var total = table.TotalCount ?? 0;
+
         var payload = new
         {
             kind = "models.count.v1",
@@ -50,7 +52,7 @@ public sealed class ModelsCountToolHandler : IToolHandler
             resource = "models.count",
             filtersApplied,
             rejectedFilters = rejected,
-            data = new { totalCount = result.TotalCount },
+            data = new { totalCount = total },
             warnings = Array.Empty<string>()
         };
 
@@ -69,7 +71,7 @@ public sealed class ModelsCountToolHandler : IToolHandler
                     Id = "ev_totalCount",
                     Type = "metric",
                     Title = "Tổng số model (theo bộ lọc)",
-                    Payload = new { totalCount = result.TotalCount, filtersApplied }
+                    Payload = new { totalCount = total, filtersApplied }
                 }
             });
 

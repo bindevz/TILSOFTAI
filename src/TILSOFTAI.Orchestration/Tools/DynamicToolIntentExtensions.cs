@@ -1,5 +1,7 @@
 namespace TILSOFTAI.Orchestration.Tools;
 
+using System.Text.Json;
+
 internal static class DynamicToolIntentExtensions
 {
     public static string? GetString(this DynamicToolIntent intent, string key)
@@ -53,5 +55,24 @@ internal static class DynamicToolIntentExtensions
             return d;
 
         return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    }
+
+    public static JsonElement? GetJson(this DynamicToolIntent intent, string key)
+    {
+        if (!intent.Args.TryGetValue(key, out var v) || v is null)
+            return null;
+
+        if (v is JsonElement je)
+            return je;
+
+        return null;
+    }
+
+    public static JsonElement GetJsonRequired(this DynamicToolIntent intent, string key)
+    {
+        var je = intent.GetJson(key);
+        if (je is null)
+            throw new ArgumentException($"{key} is required.");
+        return je.Value;
     }
 }

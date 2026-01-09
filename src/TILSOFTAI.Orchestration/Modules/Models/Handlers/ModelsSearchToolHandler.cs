@@ -6,6 +6,11 @@ using TILSOFTAI.Orchestration.Tools.Modularity;
 
 namespace TILSOFTAI.Orchestration.Modules.Models.Handlers;
 
+/// <summary>
+/// Returns models as a bounded, schema-carrying table (TabularData).
+/// This removes all model-specific DTO projections from the tool payload and keeps the result usable
+/// for downstream in-memory analytics (Atomic Data Engine).
+/// </summary>
 public sealed class ModelsSearchToolHandler : IToolHandler
 {
     public string ToolName => "models.search";
@@ -23,12 +28,13 @@ public sealed class ModelsSearchToolHandler : IToolHandler
     {
         var dyn = (DynamicToolIntent)intent;
         var (filtersApplied, rejected) = _canonicalizer.Canonicalize("models.search", dyn.Filters);
+
         if (filtersApplied.TryGetValue("season", out var seasonRaw))
         {
             filtersApplied["season"] = SeasonNormalizer.NormalizeToFull(seasonRaw);
         }
 
-        var result = await _modelsService.SearchAsync(
+        var table = await _modelsService.SearchTabularAsync(
             context.TenantId,
             filtersApplied.GetValueOrDefault("rangeName"),
             filtersApplied.GetValueOrDefault("modelCode"),
@@ -42,18 +48,18 @@ public sealed class ModelsSearchToolHandler : IToolHandler
 
         var payload = new
         {
-            kind = "models.search.v1",
-            schemaVersion = 1,
+            kind = "models.search.v2",
+            schemaVersion = 2,
             generatedAtUtc = DateTimeOffset.UtcNow,
             resource = "models.search",
             filtersApplied,
             rejectedFilters = rejected,
             data = new
             {
-                totalCount = result.TotalCount,
-                pageNumber = result.PageNumber,
-                pageSize = result.PageSize,
-                items = result.Items.Select(m => new { m.ModelID, m.ModelUD, m.ModelNM, m.Season, m.Collection, m.RangeName })
+                totalCount = table.TotalCount,
+                pageNumber = dyn.Page,
+                pageSize = dyn.PageSize,
+                table
             },
             warnings = Array.Empty<string>()
         };

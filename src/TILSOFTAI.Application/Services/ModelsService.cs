@@ -23,11 +23,21 @@ public sealed class ModelsService
         _auditLogger = auditLogger;
     }
 
-    public Task<PagedResult<Model>> SearchAsync(string tenantId, string? rangeName, string? modelCode, string? modelName, string? season, string? collection, int page, int size, TSExecutionContext context, CancellationToken cancellationToken)
+    public Task<TabularData> SearchTabularAsync(
+        string tenantId,
+        string? rangeName,
+        string? modelCode,
+        string? modelName,
+        string? season,
+        string? collection,
+        int page,
+        int size,
+        TSExecutionContext context,
+        CancellationToken cancellationToken)
     {
         BusinessValidators.ValidatePage(page, size);
         season = NormalizeSeason(season);
-        return _modelRepository.SearchAsync(context.TenantId, rangeName, modelCode, modelName, season, collection, page, size, cancellationToken);
+        return _modelRepository.SearchTabularAsync(context.TenantId, rangeName, modelCode, modelName, season, collection, page, size, cancellationToken);
     }
 
     public Task<ModelsStatsResult> StatsAsync(

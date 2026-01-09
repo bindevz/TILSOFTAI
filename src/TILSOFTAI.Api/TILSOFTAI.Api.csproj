@@ -19,4 +19,12 @@
   <ItemGroup>
     <Folder Include="DependencyInjection\" />
   </ItemGroup>
+
+  <!-- Ensure governance/contracts is deployed alongside the API for runtime schema validation (ver25) -->
+  <ItemGroup>
+    <Content Include="..\..\governance\contracts\**\*.schema.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>governance\contracts\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </Content>
+  </ItemGroup>
 </Project>

@@ -3,6 +3,11 @@
   <ItemGroup>
     <ProjectReference Include="..\TILSOFTAI.Domain\TILSOFTAI.Domain.csproj" />
     <ProjectReference Include="..\TILSOFTAI.Infrastructure\TILSOFTAI.Infrastructure.csproj" />
+      <ProjectReference Include="..\TILSOFTAI.Analytics\TILSOFTAI.Analytics.csproj" />
+</ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Analysis" Version="0.22.0" />
   </ItemGroup>
 
   <PropertyGroup>

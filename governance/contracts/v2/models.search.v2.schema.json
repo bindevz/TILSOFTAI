@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tilsoftai://contracts/models.search.v2",
+  "title": "models.search.v2",
+  "description": "Stable payload contract for models.search returning TabularData. ToolInvoker wraps this in tilsoft.envelope.v1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schemaVersion",
+    "generatedAtUtc",
+    "resource",
+    "filtersApplied",
+    "rejectedFilters",
+    "data",
+    "warnings"
+  ],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "const": "models.search.v2"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 2
+    },
+    "generatedAtUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "resource": {
+      "type": "string",
+      "const": "models.search"
+    },
+    "filtersApplied": {
+      "type": "object",
+      "description": "Canonicalized filters that were accepted and applied.",
+      "additionalProperties": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "rejectedFilters": {
+      "type": "array",
+      "description": "Incoming filter keys that were rejected by the canonicalizer.",
+      "items": {
+        "type": "string"
+      }
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "totalCount",
+        "pageNumber",
+        "pageSize",
+        "table"
+      ],
+      "properties": {
+        "totalCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "pageNumber": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pageSize": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "table": {
+          "$ref": "tabular.data.v1.schema.json"
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

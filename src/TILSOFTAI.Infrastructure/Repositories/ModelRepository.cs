@@ -17,29 +17,21 @@ public sealed class ModelRepository : IModelRepository
         _dbContext = dbContext;
     }
 
-    public async Task<PagedResult<Model>> SearchAsync(string tenantId, string? rangeName, string? modelCode, string? modelName, string? season, string? collection, int page, int size, CancellationToken cancellationToken)
+    public async Task<TabularData> SearchTabularAsync(
+        string tenantId,
+        string? rangeName,
+        string? modelCode,
+        string? modelName,
+        string? season,
+        string? collection,
+        int page,
+        int size,
+        CancellationToken cancellationToken)
     {
-        //try
-        //{
-        //    var connString = _dbContext.Database.GetConnectionString();
-        //    await using var conn = new SqlConnection(connString);
-        //    await conn.OpenAsync(cancellationToken);
-
-        //    if (conn.State != ConnectionState.Open)
-        //        await conn.OpenAsync(cancellationToken);
-        //}
-        //catch (Exception ex)
-        //{
-        //    Console.Write(ex.Message);
-        //    throw;
-        //}
+        // Same stored procedure as SearchAsync, but without mapping to domain entities.
         var connString = _dbContext.Database.GetConnectionString();
         await using var conn = new SqlConnection(connString);
         await conn.OpenAsync(cancellationToken);
-
-        if (conn.State != ConnectionState.Open)
-            await conn.OpenAsync(cancellationToken);
-
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = "dbo.TILSOFTAI_sp_models_search";
@@ -50,45 +42,35 @@ public sealed class ModelRepository : IModelRepository
         cmd.Parameters.Add(new SqlParameter("@ModelName", SqlDbType.VarChar, 200) { Value = (object?)modelName ?? DBNull.Value });
         cmd.Parameters.Add(new SqlParameter("@Season", SqlDbType.VarChar, 9) { Value = (object?)season ?? DBNull.Value });
         cmd.Parameters.Add(new SqlParameter("@Collection", SqlDbType.VarChar, 50) { Value = (object?)collection ?? DBNull.Value });
-
         cmd.Parameters.Add(new SqlParameter("@Page", SqlDbType.Int) { Value = page });
         cmd.Parameters.Add(new SqlParameter("@Size", SqlDbType.Int) { Value = size });
 
-        var items = new List<Model>();
-        int total = 0;
+        var rows = new List<object?[]>(capacity: Math.Min(size, 2048));
+        int? total = null;
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
 
-
-        // Cache ordinals một lần
-        var ordModelId = reader.GetOrdinal("ModelID");
-        var ordModelUd = reader.GetOrdinal("ModelUD");
-        var ordModelNm = reader.GetOrdinal("ModelNM");
-        var ordSeason = reader.GetOrdinal("Season");
-        var ordCollection = reader.GetOrdinal("Collection");
-        var ordRangeName = reader.GetOrdinal("RangeName");
-
-        static string GetStringOrEmpty(SqlDataReader r, int ord)
-            => r.IsDBNull(ord) ? string.Empty : r.GetString(ord);
-
-        static int GetInt32Safe(SqlDataReader r, int ord)
-        {
-            if (r.IsDBNull(ord)) return 0;
-
-            // Nếu DB trả bigint/decimal thì Convert sẽ “chịu” tốt hơn GetInt32 trực tiếp
-            return Convert.ToInt32(r.GetValue(ord));
-        }
+        // We keep a small, stable column surface for ver-23 (can be extended later by Semantic Catalog).
+        // If the stored procedure adds new columns, we ignore them unless explicitly mapped.
+        var ordModelId = SafeOrdinal(reader, "ModelID");
+        var ordModelUd = SafeOrdinal(reader, "ModelUD");
+        var ordModelNm = SafeOrdinal(reader, "ModelNM");
+        var ordSeason = SafeOrdinal(reader, "Season");
+        var ordCollection = SafeOrdinal(reader, "Collection");
+        var ordRangeName = SafeOrdinal(reader, "RangeName");
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            items.Add(new Model
+            object? Get(int ord) => ord < 0 || reader.IsDBNull(ord) ? null : reader.GetValue(ord);
+
+            rows.Add(new object?[]
             {
-                ModelID = GetInt32Safe(reader, ordModelId),
-                ModelUD = GetStringOrEmpty(reader, ordModelUd),
-                ModelNM = GetStringOrEmpty(reader, ordModelNm),
-                Season = GetStringOrEmpty(reader, ordSeason),
-                Collection = GetStringOrEmpty(reader, ordCollection),
-                RangeName = GetStringOrEmpty(reader, ordRangeName)
+                Get(ordModelId),
+                Get(ordModelUd),
+                Get(ordModelNm),
+                Get(ordSeason),
+                Get(ordCollection),
+                Get(ordRangeName)
             });
         }
 
@@ -97,17 +79,23 @@ public sealed class ModelRepository : IModelRepository
         {
             if (await reader.ReadAsync(cancellationToken))
             {
-                total = reader.GetInt32(reader.GetOrdinal("TotalCount"));
+                var ordTotal = SafeOrdinal(reader, "TotalCount");
+                if (ordTotal >= 0 && !reader.IsDBNull(ordTotal))
+                    total = Convert.ToInt32(reader.GetValue(ordTotal));
             }
         }
 
-        return new PagedResult<Model>
+        var cols = new List<TabularColumn>
         {
-            Items = items,
-            TotalCount = total,
-            PageNumber = page,
-            PageSize = size
+            new("modelId", TabularType.Int32),
+            new("modelCode", TabularType.String),
+            new("modelName", TabularType.String),
+            new("season", TabularType.String),
+            new("collection", TabularType.String),
+            new("rangeName", TabularType.String)
         };
+
+        return new TabularData(cols, rows, total);
     }
 
     public async Task<ModelsStatsResult> GetStatsAsync(
@@ -183,8 +171,8 @@ public sealed class ModelRepository : IModelRepository
         catch (SqlException ex) when (ex.Number == 2812) // could not find stored procedure
         {
             // Fallback for environments where the enterprise stored procedure isn't deployed yet.
-            var search = await SearchAsync(tenantId, rangeName, modelCode, modelName, season, collection, page: 1, size: 1, cancellationToken);
-            return new ModelsStatsResult(search.TotalCount, Array.Empty<ModelsStatsBreakdown>());
+            var search = await SearchTabularAsync(tenantId, rangeName, modelCode, modelName, season, collection, page: 1, size: 1, cancellationToken);
+            return new ModelsStatsResult(search.TotalCount ?? 0, Array.Empty<ModelsStatsBreakdown>());
         }
     }
 

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tilsoftai://contracts/models.get.v2",
+  "title": "models.get.v2",
+  "description": "Stable payload contract for models.get returning a single-row TabularData model header. ToolInvoker wraps this in tilsoft.envelope.v1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schemaVersion",
+    "generatedAtUtc",
+    "resource",
+    "data",
+    "warnings"
+  ],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "const": "models.get.v2"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 2
+    },
+    "generatedAtUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "resource": {
+      "type": "string",
+      "const": "models.get"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "table"
+      ],
+      "properties": {
+        "table": {
+          "$ref": "tabular.data.v1.schema.json"
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

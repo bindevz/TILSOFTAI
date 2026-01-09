@@ -1,0 +1,24 @@
+{
+  "kind": "models.attributes.list.v2",
+  "schemaVersion": 2,
+  "generatedAtUtc": "2026-01-09T00:00:00Z",
+  "resource": "models.attributes.list",
+  "data": {
+    "modelId": "11111111-1111-1111-1111-111111111111",
+    "table": {
+      "columns": [
+        {
+          "name": "name",
+          "type": 0
+        },
+        {
+          "name": "value",
+          "type": 0
+        }
+      ],
+      "rows": [],
+      "totalCount": 0
+    }
+  },
+  "warnings": []
+}

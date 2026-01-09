@@ -2,7 +2,8 @@
   <Folder Name="/src/">
     <Project Path="src/TILSOFTAI.Api/TILSOFTAI.Api.csproj" />
     <Project Path="src/TILSOFTAI.Application/TILSOFTAI.Application.csproj" />
-    <Project Path="src/TILSOFTAI.Domain/TILSOFTAI.Domain.csproj" />
+        <Project Path="src/TILSOFTAI.Analytics/TILSOFTAI.Analytics.csproj" />
+<Project Path="src/TILSOFTAI.Domain/TILSOFTAI.Domain.csproj" />
     <Project Path="src/TILSOFTAI.Infrastructure/TILSOFTAI.Infrastructure.csproj" />
     <Project Path="src/TILSOFTAI.Orchestration/TILSOFTAI.Orchestration.csproj" />
   </Folder>

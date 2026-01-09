@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tilsoftai://contracts/models.price.analyze.v2",
+  "title": "models.price.analyze.v2",
+  "description": "Stable payload contract for models.price.analyze returning a single-row TabularData price analysis. ToolInvoker wraps this in tilsoft.envelope.v1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schemaVersion",
+    "generatedAtUtc",
+    "resource",
+    "data",
+    "warnings"
+  ],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "const": "models.price.analyze.v2"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 2
+    },
+    "generatedAtUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "resource": {
+      "type": "string",
+      "const": "models.price.analyze"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "modelId",
+        "table"
+      ],
+      "properties": {
+        "modelId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "table": {
+          "$ref": "tabular.data.v1.schema.json"
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -40,7 +40,7 @@ public sealed class ModelsQueryToolsPlugin
         => _invoker.ExecuteAsync("models.stats", new { filters = filters ?? new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase), topN }, ct);
 
     [KernelFunction("get")]
-    [Description("Lấy chi tiết một model theo modelId (GUID).")]
-    public Task<object> GetAsync(Guid modelId, CancellationToken ct = default)
+    [Description("Lấy chi tiết một model theo modelId (int, lấy từ models.search/model.options).")]
+    public Task<object> GetAsync(int modelId, CancellationToken ct = default)
         => _invoker.ExecuteAsync("models.get", new { modelId }, ct);
 }

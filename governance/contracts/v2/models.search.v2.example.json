@@ -1,0 +1,66 @@
+{
+  "kind": "models.search.v2",
+  "schemaVersion": 2,
+  "generatedAtUtc": "2026-01-09T00:00:00Z",
+  "resource": "models.search",
+  "filtersApplied": {
+    "season": "2024/2025",
+    "collection": "Modern"
+  },
+  "rejectedFilters": [
+    "unknownFilter"
+  ],
+  "data": {
+    "totalCount": 2,
+    "pageNumber": 1,
+    "pageSize": 50,
+    "table": {
+      "columns": [
+        {
+          "name": "modelId",
+          "type": 1
+        },
+        {
+          "name": "modelCode",
+          "type": 0
+        },
+        {
+          "name": "modelName",
+          "type": 0
+        },
+        {
+          "name": "season",
+          "type": 0
+        },
+        {
+          "name": "collection",
+          "type": 0
+        },
+        {
+          "name": "rangeName",
+          "type": 0
+        }
+      ],
+      "rows": [
+        [
+          101,
+          "M-001",
+          "Chair A",
+          "2024/2025",
+          "Modern",
+          "Range X"
+        ],
+        [
+          102,
+          "M-002",
+          "Chair B",
+          "2024/2025",
+          "Modern",
+          "Range X"
+        ]
+      ],
+      "totalCount": 2
+    }
+  },
+  "warnings": []
+}
