@@ -18,6 +18,9 @@ namespace TILSOFTAI.Orchestration.Contracts.Validation;
 /// </summary>
 public sealed class ResponseSchemaValidator : IResponseSchemaValidator
 {
+    // IMPORTANT: Use Web defaults (camelCase) to match governance schemas.
+    private static readonly JsonSerializerOptions InstanceJson = new(JsonSerializerDefaults.Web);
+
     private readonly ILogger<ResponseSchemaValidator> _log;
     private readonly ResponseSchemaValidationOptions _opt;
 
@@ -81,7 +84,10 @@ public sealed class ResponseSchemaValidator : IResponseSchemaValidator
         // Tool handlers (or other layers) may accidentally return a JsonElement backed by a disposed JsonDocument.
         // Also, Json.Schema may keep references to the instance element while producing EvaluationResults.
         // Therefore we always materialize a fresh, self-owned JsonElement via Clone().
-        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(payload, JsonSerializerOptions.Default));
+        // IMPORTANT: serialize using Web defaults to match contract casing (camelCase).
+        // If we serialize using JsonSerializerOptions.Default, record/class properties will be PascalCase
+        // (e.g., Columns/Rows/TotalCount) and will falsely violate the schema (columns/rows/totalCount).
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(payload, InstanceJson));
         var root = doc.RootElement.Clone();
         if (root.ValueKind != JsonValueKind.Object)
             return;

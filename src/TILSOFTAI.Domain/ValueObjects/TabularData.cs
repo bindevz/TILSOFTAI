@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace TILSOFTAI.Domain.ValueObjects;
 
 /// <summary>
@@ -9,13 +11,13 @@ namespace TILSOFTAI.Domain.ValueObjects;
 /// - Efficient to materialize into DataFrames or stream to clients as previews.
 /// </summary>
 public sealed record TabularData(
-    IReadOnlyList<TabularColumn> Columns,
-    IReadOnlyList<object?[]> Rows,
-    int? TotalCount = null);
+    [property: JsonPropertyName("columns")] IReadOnlyList<TabularColumn> Columns,
+    [property: JsonPropertyName("rows")] IReadOnlyList<object?[]> Rows,
+    [property: JsonPropertyName("totalCount")] int? TotalCount = null);
 
 public sealed record TabularColumn(
-    string Name,
-    TabularType Type);
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("type")] TabularType Type);
 
 public enum TabularType
 {

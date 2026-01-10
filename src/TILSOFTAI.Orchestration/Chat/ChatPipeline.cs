@@ -6,6 +6,7 @@ using System.Text.Json;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Orchestration.Llm;
 using TILSOFTAI.Orchestration.Chat.Localization;
+using TILSOFTAI.Orchestration.Contracts.Validation;
 using TILSOFTAI.Orchestration.SK;
 using TILSOFTAI.Orchestration.SK.Conversation;
 using TILSOFTAI.Orchestration.SK.Governance;
@@ -260,6 +261,11 @@ public sealed class ChatPipeline
             {
                 content = string.Empty;
             }
+        }
+        catch (ToolContractViolationException ex)
+        {
+            // Non-retryable server-side contract drift. Do not call the LLM again.
+            return BuildFailureResponse(ex.Message, request.Model, incomingMessages);
         }
         catch
         {

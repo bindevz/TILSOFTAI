@@ -141,16 +141,10 @@ public sealed class ToolInvoker
         catch (ResponseContractException ex)
         {
             // Contract/guardrail error.
-            var code = string.Equals(ex.Message, "Forbidden.", StringComparison.OrdinalIgnoreCase) ? "FORBIDDEN" : "CONTRACT_ERROR";
-            policy = EnvelopePolicyV1.Deny(_ctx.Context, code);
-            return EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
-                telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
-                policy: policy,
-                code: code,
-                message: ex.Message,
-                normalizedIntent: normalizedIntent,
-                source: source,
-                evidence: evidence);
+            // This is non-retryable: the payload emitted by the server does not match governance schema.
+            // Retrying the LLM will only increase cost and spam logs.
+            throw new ToolContractViolationException(
+                $"CONTRACT_ERROR in tool '{toolName}': {ex.Message}", ex);
         }
         catch (Exception ex)
         {
