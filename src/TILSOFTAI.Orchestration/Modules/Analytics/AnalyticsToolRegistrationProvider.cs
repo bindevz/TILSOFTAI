@@ -19,6 +19,9 @@ public sealed class AnalyticsToolRegistrationProvider : IToolRegistrationProvide
 
         yield return Dynamic("atomic.query.execute", requiresWrite: false,
             allowed: new[] { "spName", "params", "maxRowsPerTable", "maxRowsSummary", "maxSchemaRows", "maxTables", "maxColumns", "maxDisplayRows", "previewRows" });
+
+        yield return Dynamic("atomic.catalog.search", requiresWrite: false,
+            allowed: new[] { "query", "topK" });
     }
 
     private ToolDefinition Dynamic(string toolName, bool requiresWrite, IEnumerable<string> allowed)

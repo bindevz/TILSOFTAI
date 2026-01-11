@@ -19,6 +19,7 @@ public sealed class ResponseSchemaValidationOptions
     /// </summary>
     public string[] EnforcedKinds { get; set; } =
     [
-        "atomic.query.execute.v1"
+        "atomic.query.execute.v1",
+        "atomic.catalog.search.v1"
     ];
 }

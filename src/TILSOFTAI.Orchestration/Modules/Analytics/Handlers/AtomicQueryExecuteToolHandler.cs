@@ -23,11 +23,16 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
     private readonly AtomicQueryService _atomicQueryService;
     private readonly AnalyticsService _analyticsService;
+    private readonly AtomicCatalogService _catalog;
 
-    public AtomicQueryExecuteToolHandler(AtomicQueryService atomicQueryService, AnalyticsService analyticsService)
+    public AtomicQueryExecuteToolHandler(
+        AtomicQueryService atomicQueryService,
+        AnalyticsService analyticsService,
+        AtomicCatalogService catalog)
     {
         _atomicQueryService = atomicQueryService;
         _analyticsService = analyticsService;
+        _catalog = catalog;
     }
 
     public async Task<ToolDispatchResult> HandleAsync(object intent, TSExecutionContext context, CancellationToken cancellationToken)
@@ -35,6 +40,10 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         var dyn = (DynamicToolIntent)intent;
 
         var spName = NormalizeStoredProcedureName(dyn.GetStringRequired("spName"));
+
+        // Governance: allow only stored procedures registered in catalog.
+        // Fail-closed: if not present/enabled/readonly/atomicCompatible => reject.
+        var catalogEntry = await _catalog.GetRequiredAllowedAsync(spName, cancellationToken);
         var readOptions = new AtomicQueryReadOptions(
             MaxRowsPerTable: dyn.GetInt("maxRowsPerTable", 20000),
             MaxRowsSummary: dyn.GetInt("maxRowsSummary", 500),
@@ -53,7 +62,11 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
         var parameters = ParseSqlParameters(dyn.GetJson("params"));
 
-        var atomic = await _atomicQueryService.ExecuteAsync(spName, parameters, readOptions, cancellationToken);
+        // Filter params by catalog allow-list (Option 2): drop unknown params and emit warnings.
+        var allowedParams = AtomicCatalogService.GetAllowedParamNames(catalogEntry.ParamsJson);
+        var (filteredParams, droppedParams) = FilterParams(parameters, allowedParams);
+
+        var atomic = await _atomicQueryService.ExecuteAsync(spName, filteredParams, readOptions, cancellationToken);
 
         // Summary (RS1) is always safe to display (bounded by MaxRowsSummary).
         var summaryPayload = atomic.Summary is null ? null : new
@@ -68,6 +81,12 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         var displayTables = new List<object>();
         var engineDatasets = new List<object>();
         var warnings = new List<string>();
+
+        if (allowedParams.Count == 0)
+            warnings.Add($"Catalog allow-list for '{spName}' is empty. All provided params were dropped. Populate ParamsJson in dbo.TILSOFTAI_SPCatalog to enable governed parameters.");
+
+        if (droppedParams.Count > 0)
+            warnings.Add($"Dropped {droppedParams.Count} unknown params (not in catalog allow-list) for '{spName}': {string.Join(", ", droppedParams)}");
 
         foreach (var t in atomic.Tables)
         {
@@ -150,12 +169,19 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         var payload = new
         {
             kind = "atomic.query.execute.v1",
-            schemaVersion = 1,
+            schemaVersion = 2,
             generatedAtUtc = DateTimeOffset.UtcNow,
             resource = "atomic.query.execute",
             data = new
             {
                 storedProcedure = spName,
+                catalog = new
+                {
+                    domain = catalogEntry.Domain,
+                    entity = catalogEntry.Entity,
+                    intent = new { vi = catalogEntry.IntentVi, en = catalogEntry.IntentEn },
+                    tags = catalogEntry.Tags
+                },
                 schema = atomic.Schema,
                 summary = summaryPayload,
                 displayTables,
@@ -207,6 +233,37 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         }
 
         return dict;
+    }
+
+    private static (IReadOnlyDictionary<string, object?> Filtered, List<string> Dropped) FilterParams(
+        IReadOnlyDictionary<string, object?> parameters,
+        IReadOnlySet<string> allowedParams)
+    {
+        if (parameters is null || parameters.Count == 0)
+            return (new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase), new List<string>());
+
+        // Fail-closed when allow-list is empty: drop all.
+        if (allowedParams is null || allowedParams.Count == 0)
+            return (new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase), parameters.Keys.ToList());
+
+        var filtered = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        var dropped = new List<string>();
+
+        foreach (var kv in parameters)
+        {
+            var normalized = AtomicCatalogService.NormalizeParamName(kv.Key);
+            if (allowedParams.Contains(normalized))
+            {
+                // Keep original key; repository will normalize to @param.
+                filtered[kv.Key] = kv.Value;
+            }
+            else
+            {
+                dropped.Add(kv.Key);
+            }
+        }
+
+        return (filtered, dropped);
     }
 
     private static object? ConvertJsonValue(JsonElement v)

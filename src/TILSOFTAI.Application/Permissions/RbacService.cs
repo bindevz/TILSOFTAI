@@ -16,6 +16,7 @@ public sealed class RbacService
 
         // Analytics / Atomic
         ["analytics.run"] = ReadRoles,
+        ["atomic.catalog.search"] = ReadRoles,
         ["atomic.query.execute"] = ReadRoles
     };
 

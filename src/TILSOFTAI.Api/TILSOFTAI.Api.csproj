@@ -24,6 +24,16 @@
   <ItemGroup>
     <Content Include="..\..\governance\contracts\**\*.schema.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <!--
+        IMPORTANT (ver27.3): ResponseSchemaValidator resolves schemas at runtime under
+          <app_base>/governance/contracts/v*/**/*.schema.json
+
+        Using only <Link> does NOT guarantee that the files keep a stable relative
+        path in build/publish outputs. <TargetPath> ensures the on-disk layout is
+        deterministic, preventing "Missing response schema" errors.
+      -->
+      <TargetPath>governance\contracts\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <Link>governance\contracts\%(RecursiveDir)%(Filename)%(Extension)</Link>
     </Content>
   </ItemGroup>

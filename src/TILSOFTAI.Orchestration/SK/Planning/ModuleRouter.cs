@@ -11,7 +11,10 @@ public sealed class ModuleRouter
     {
         var dict = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase)
         {
-            ["models"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            // AtomicQuery + AtomicDataEngine live under the "analytics" module.
+            // We keep business keywords here to ensure the analytics tools are exposed
+            // even when the user talks about "model" or other ERP entities.
+            ["analytics"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
                 "model", "mẫu", "mô hình", "sản phẩm", "sku", "attribute", "giá"
             }
@@ -59,9 +62,9 @@ public sealed class ModuleRouter
                 modules.Add(kvp.Key);
         }
 
-        // Analytics/reporting often needs modules
+        // Analytics/reporting often needs the analytics module
         if (ContainsAny(t, "báo cáo", "phân tích", "doanh số", "lợi nhuận", "kpi", "trend", "xu hướng"))
-            modules.Add("models");
+            modules.Add("analytics");
 
         if (modules.Count == 0)
             return Array.Empty<string>();

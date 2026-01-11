@@ -8,6 +8,7 @@ public sealed class AnalyticsToolInputSpecProvider : IToolInputSpecProvider
     {
         yield return BuildRun();
         yield return BuildAtomicQueryExecute();
+        yield return BuildAtomicCatalogSearch();
     }
 
     private static ToolInputSpec BuildRun()
@@ -43,6 +44,18 @@ public sealed class AnalyticsToolInputSpecProvider : IToolInputSpecProvider
         spec.Args["previewRows"] = new ToolArgSpec("previewRows", ToolArgType.Int, Required: false, Default: 100, MinInt: 0, MaxInt: 200);
         return spec;
     }
+
+    private static ToolInputSpec BuildAtomicCatalogSearch()
+    {
+        var spec = Default("atomic.catalog.search");
+        spec.SupportsPaging = false;
+        spec.AllowedFilterKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        spec.Args["query"] = new ToolArgSpec("query", ToolArgType.String, Required: true);
+        spec.Args["topK"] = new ToolArgSpec("topK", ToolArgType.Int, Required: false, Default: 5, MinInt: 1, MaxInt: 20);
+        return spec;
+    }
+
 
     private static ToolInputSpec Default(string toolName) => new()
     {

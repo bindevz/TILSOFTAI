@@ -53,6 +53,7 @@ system_prompt:
     You must NEVER generate SQL.
     You must NEVER explain anything.
     Default to tool `atomic.query.execute` for SQL-backed data retrieval. Do NOT use `models.search` (removed).
+    If you are not sure which spName to use, call `atomic.catalog.search` first, then execute the chosen spName with `atomic.query.execute`.
     If the request is unclear, choose the closest matching tool.
 
 solution_structure:

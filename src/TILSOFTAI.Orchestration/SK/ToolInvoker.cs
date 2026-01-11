@@ -63,6 +63,7 @@ public sealed class ToolInvoker
         EnvelopeSourceV1? source = null;
         IReadOnlyList<EnvelopeEvidenceItemV1>? evidence = null;
 
+        object? lastPayload = null;
         try
         {
             if (!_registry.IsWhitelisted(toolName))
@@ -124,7 +125,8 @@ public sealed class ToolInvoker
 
             // Runtime response contract validation (ver25)
             // Ensures tool handlers cannot drift away from governance/contracts.
-            _responseSchemaValidator.ValidateOrThrow(dispatchResult.Result.Data, toolName);
+            lastPayload = dispatchResult.Result.Data;
+            _responseSchemaValidator.ValidateOrThrow(lastPayload, toolName);
 
             // Update conversation state for follow-up turns (only for successful READ queries)
             await TryUpdateConversationStateAsync(toolName, normalizedIntent, requiresWrite, ct);
@@ -142,9 +144,24 @@ public sealed class ToolInvoker
         {
             // Contract/guardrail error.
             // This is non-retryable: the payload emitted by the server does not match governance schema.
-            // Retrying the LLM will only increase cost and spam logs.
-            throw new ToolContractViolationException(
-                $"CONTRACT_ERROR in tool '{toolName}': {ex.Message}", ex);
+            // Returning a structured failure envelope prevents the LLM from repeatedly calling the same tool
+            // while also keeping the API stable (no hard throw).
+            policy = EnvelopePolicyV1.Deny(_ctx.Context, "CONTRACT_ERROR");
+            return EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
+                telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
+                policy: policy,
+                code: "CONTRACT_ERROR",
+                message: ex.Message,
+                details: new
+                {
+                    kind = "response.schema.validation",
+                    tool = toolName,
+                    payloadKind = TryGetPayloadKind(lastPayload),
+                    payloadSchemaVersion = TryGetPayloadSchemaVersion(lastPayload)
+                },
+                normalizedIntent: normalizedIntent,
+                source: source,
+                evidence: evidence);
         }
         catch (Exception ex)
         {
@@ -256,5 +273,42 @@ public sealed class ToolInvoker
         }
 
         return dict;
+    }
+
+    private static string? TryGetPayloadKind(object? payload)
+    {
+        if (payload is null) return null;
+
+        try
+        {
+            // Best-effort: serialize to a JsonDocument and extract "kind".
+            var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.TryGetProperty("kind", out var kindEl) && kindEl.ValueKind == JsonValueKind.String
+                ? kindEl.GetString()
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static int? TryGetPayloadSchemaVersion(object? payload)
+    {
+        if (payload is null) return null;
+
+        try
+        {
+            var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.TryGetProperty("schemaVersion", out var verEl) && verEl.ValueKind == JsonValueKind.Number
+                ? verEl.GetInt32()
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 }

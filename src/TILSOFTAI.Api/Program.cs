@@ -36,7 +36,12 @@ builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAnalyticsDatasetStore
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.FiltersCatalog.IFilterCatalogRegistry, TILSOFTAI.Orchestration.Tools.FiltersCatalog.FilterCatalogRegistry>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.Modularity.IFilterCanonicalizer, TILSOFTAI.Orchestration.Tools.Modularity.FilterCanonicalizer>();
 
+// Catalog services used by catalog tool handlers
+builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.FiltersCatalog.IFilterCatalogService, TILSOFTAI.Orchestration.Tools.FiltersCatalog.FilterCatalogService>();
+
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ActionsCatalog.IActionsCatalogRegistry, TILSOFTAI.Orchestration.Tools.ActionsCatalog.ActionCatalogRegistry>();
+
+builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.ActionsCatalog.IActionsCatalogService, TILSOFTAI.Orchestration.Tools.ActionsCatalog.ActionsCatalogService>();
 
 // Tool schemas contributed by modules
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolSchemas.IToolInputSpecProvider, TILSOFTAI.Orchestration.Modules.Common.CommonToolInputSpecProvider>();
@@ -56,12 +61,30 @@ builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler
 // Analytics tools
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler, TILSOFTAI.Orchestration.Modules.Analytics.Handlers.AnalyticsRunToolHandler>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler, TILSOFTAI.Orchestration.Modules.Analytics.Handlers.AtomicQueryExecuteToolHandler>();
+builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler, TILSOFTAI.Orchestration.Modules.Analytics.Handlers.AtomicCatalogSearchToolHandler>();
 
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.ToolDispatcher>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Llm.TokenBudget>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Chat.ChatPipeline>();
 builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAuditLogger, TILSOFTAI.Infrastructure.Observability.AuditLogger>();
 builder.Services.AddScoped<TILSOFTAI.Domain.Interfaces.IConfirmationPlanStore, TILSOFTAI.Infrastructure.Data.SqlConfirmationPlanStore>();
+
+// Filters
+builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.Filters.IFilterPatchMerger, TILSOFTAI.Orchestration.Tools.Filters.FilterPatchMerger>();
+
+// SK planning / governance
+builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.Plugins.PluginCatalog>(sp =>
+    new TILSOFTAI.Orchestration.SK.Plugins.PluginCatalog(typeof(TILSOFTAI.Orchestration.SK.Plugins.AnalyticsToolsPlugin).Assembly));
+builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.Planning.ModuleRouter>();
+builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.Planning.PlannerRouter>();
+builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.Planning.StepwiseLoopRunner>();
+builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.Planning.IPluginExposurePolicy, TILSOFTAI.Orchestration.SK.Planning.DefaultPluginExposurePolicy>();
+builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.Governance.CommitGuardFilter>();
+builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.Governance.AutoInvocationCircuitBreakerFilter>();
+
+// SK plugins (must be registered so PluginCatalog can instantiate them)
+builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.Plugins.AnalyticsToolsPlugin>();
+builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.Plugins.FiltersToolsPlugin>();
 
 // Auto registrations (Application Services + Infrastructure Repositories)
 builder.Services.AddTilsoftaiAutoRegistrations();
