@@ -2,10 +2,14 @@
 
 TILSOFTAI là nền tảng **AI Orchestrator cho ERP**: kết nối Open WebUI (OpenAI-compatible client) với LLM (LM Studio/OpenAI-compatible) và SQL Server thông qua API .NET 8, theo mô hình **Tool/Function Calling** với **guardrails chuẩn enterprise**.
 
-Phiên bản **ver22** kế thừa ver21 và tập trung vào 3 mục tiêu:
+Phiên bản **ver26** kế thừa ver25 và tập trung vào 3 mục tiêu:
 1) **Tách nghiệp vụ theo Module** (hiện tại migrate **Models**), Core không phình theo số lượng nghiệp vụ.
 2) **Chọn tool thông minh** để tránh overload (không load toàn bộ tools vào LLM mỗi lượt), đồng thời hỗ trợ **câu hỏi nối tiếp** (follow-up) không nhắc lại chủ thể.
 3) **Clean code**: loại bỏ cơ chế registry/dispatcher hardcode cũ, giảm điểm nghẽn khi mở rộng.
+
+ver26 bổ sung:
+- **Auto-map TabularData từ DbDataReader** (không khai báo cột trong Repository).
+- **SQL-first Semantics**: mặc định ResultSet-0 là metadata mô tả ngữ nghĩa cột; tool payload trả kèm `data.schema` để LLM không suy luận bừa.
 
 ver21 bổ sung thêm:
 - **Đa ngôn ngữ (VI/EN)**: user chat tiếng Anh → trả lời tiếng Anh; chat tiếng Việt → trả lời tiếng Việt. Ngôn ngữ được suy luận theo lượt chat và được lưu theo ConversationId để hỗ trợ follow-up ngắn.
@@ -176,11 +180,7 @@ Ghi chú:
 Trong 1 module có thể có nhiều tool. Ver20 chia plugin theo **tool packs** và chỉ expose pack cần thiết.
 
 - Interface: `IPluginExposurePolicy`
-- `ModelsPluginExposurePolicy` chọn pack dựa trên heuristic:
-  - Hỏi về **options/attributes/constraints** → expose `ModelsOptionsToolsPlugin`
-  - Hỏi về **price/cost** → expose `ModelsPriceToolsPlugin`
-  - Hỏi về **create/commit** → expose `ModelsWriteToolsPlugin`
-  - Mặc định luôn expose `ModelsQueryToolsPlugin`
+Ghi chú (ver26.4+): Models module đã được thay bằng tool generic `atomic.query.execute` chạy theo template Atomic (RS0 schema, RS1 summary, RS2..N tables). Vì vậy cơ chế “expose theo Models tool packs” không còn dùng.
 
 Kết quả: giảm số function exposures, giảm token overhead, tăng ổn định.
 
@@ -195,27 +195,16 @@ Kết quả: giảm số function exposures, giảm token overhead, tăng ổn �
 Vị trí:
 - `src/TILSOFTAI.Orchestration/Modules/Common/`
 
-### 5.2. Models module (đã migrate)
+### 5.2. Atomic Query (generic)
 Tool handlers:
-- `models.search`
-- `models.count`
-- `models.stats`
-- `models.options`
-- `models.get`
-- `models.attributes.list`
-- `models.price.analyze`
-- `models.create.prepare`
-- `models.create.commit`
+- `atomic.query.execute`
 
-Plugin packs:
-- `ModelsQueryToolsPlugin`
-- `ModelsOptionsToolsPlugin`
-- `ModelsPriceToolsPlugin`
-- `ModelsWriteToolsPlugin`
+Mục tiêu:
+- Thực thi stored procedure theo chuẩn `TILSOFTAI_sp_AtomicQuery_Template`.
+- Parse kết quả theo RS0/RS1/RS2..N và tự routing dữ liệu (display/engine/both) theo schema.
 
 Vị trí:
-- `src/TILSOFTAI.Orchestration/Modules/Models/`
-- `src/TILSOFTAI.Orchestration/SK/Plugins/`
+- `src/TILSOFTAI.Orchestration/Modules/Analytics/` (tool handler)
 
 ---
 
@@ -331,14 +320,14 @@ Lưu ý:
 ## 10. Testing checklist (khuyến nghị)
 
 ### Read flow
-- “Có bao nhiêu model?” → `models.count` hoặc `models.stats`
-- “Mùa 24/25 có bao nhiêu model?” → season normalize + `models.stats`
+- “Có bao nhiêu model?” → `atomic.query.execute` (spName: `dbo.TILSOFTAI_sp_models_search`, đọc `RS1.summary.totalCount`).
+- “Mùa 24/25 có bao nhiêu model?” → `atomic.query.execute` với `params.season`/`params.Season` tuỳ SP.
 
 ### Options flow
-- “Model A có những tùy chọn nào?” → `models.search` → `models.options`
+- “Model A có những tùy chọn nào?” → `atomic.query.execute` với stored procedure phù hợp (kết quả theo template Atomic).
 
 ### Write flow
-- “Tạo model …” → `models.create.prepare` → người dùng xác nhận → `models.create.commit`
+- “Tạo/chỉnh dữ liệu …” → dùng `actions.catalog` để chọn action phù hợp, sau đó theo 2 bước prepare → confirm → commit.
 
 ### Error expected
 - Thiếu quyền → envelope `ok=false`, `error.code=FORBIDDEN`, LLM không retry.

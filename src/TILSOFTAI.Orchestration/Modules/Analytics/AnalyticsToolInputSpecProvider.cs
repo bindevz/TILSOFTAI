@@ -1,38 +1,16 @@
-using TILSOFTAI.Orchestration.Tools.FiltersCatalog;
 using TILSOFTAI.Orchestration.Tools.ToolSchemas;
 
 namespace TILSOFTAI.Orchestration.Modules.Analytics;
 
 public sealed class AnalyticsToolInputSpecProvider : IToolInputSpecProvider
 {
-    private readonly IFilterCatalogRegistry _filterRegistry;
-
-    public AnalyticsToolInputSpecProvider(IFilterCatalogRegistry filterRegistry)
-    {
-        _filterRegistry = filterRegistry;
-    }
-
     public IEnumerable<ToolInputSpec> GetSpecs()
     {
-        yield return BuildDatasetCreate();
         yield return BuildRun();
+        yield return BuildAtomicQueryExecute();
     }
 
-    private ToolInputSpec BuildDatasetCreate()
-    {
-        var spec = Default("analytics.dataset.create");
-        spec.SupportsPaging = false;
-        spec.AllowedFilterKeys = FilterKeySetBuilder.Build(_filterRegistry, "analytics.dataset.create");
-
-        spec.Args["source"] = new ToolArgSpec("source", ToolArgType.String, Required: false, Default: "models");
-        spec.Args["select"] = new ToolArgSpec("select", ToolArgType.Json, Required: false, Default: null);
-        spec.Args["maxRows"] = new ToolArgSpec("maxRows", ToolArgType.Int, Required: false, Default: 20000, MinInt: 1, MaxInt: 100000);
-        spec.Args["maxColumns"] = new ToolArgSpec("maxColumns", ToolArgType.Int, Required: false, Default: 40, MinInt: 1, MaxInt: 100);
-        spec.Args["previewRows"] = new ToolArgSpec("previewRows", ToolArgType.Int, Required: false, Default: 100, MinInt: 0, MaxInt: 200);
-        return spec;
-    }
-
-    private ToolInputSpec BuildRun()
+    private static ToolInputSpec BuildRun()
     {
         var spec = Default("analytics.run");
         spec.SupportsPaging = false;
@@ -43,6 +21,26 @@ public sealed class AnalyticsToolInputSpecProvider : IToolInputSpecProvider
         spec.Args["topN"] = new ToolArgSpec("topN", ToolArgType.Int, Required: false, Default: 20, MinInt: 1, MaxInt: 200);
         spec.Args["maxGroups"] = new ToolArgSpec("maxGroups", ToolArgType.Int, Required: false, Default: 200, MinInt: 1, MaxInt: 5000);
         spec.Args["maxResultRows"] = new ToolArgSpec("maxResultRows", ToolArgType.Int, Required: false, Default: 500, MinInt: 1, MaxInt: 5000);
+        return spec;
+    }
+
+    private static ToolInputSpec BuildAtomicQueryExecute()
+    {
+        var spec = Default("atomic.query.execute");
+        spec.SupportsPaging = false;
+        spec.AllowedFilterKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        spec.Args["spName"] = new ToolArgSpec("spName", ToolArgType.String, Required: true);
+        spec.Args["params"] = new ToolArgSpec("params", ToolArgType.Json, Required: false, Default: null);
+
+        spec.Args["maxRowsPerTable"] = new ToolArgSpec("maxRowsPerTable", ToolArgType.Int, Required: false, Default: 20000, MinInt: 1, MaxInt: 200000);
+        spec.Args["maxRowsSummary"] = new ToolArgSpec("maxRowsSummary", ToolArgType.Int, Required: false, Default: 500, MinInt: 0, MaxInt: 50000);
+        spec.Args["maxSchemaRows"] = new ToolArgSpec("maxSchemaRows", ToolArgType.Int, Required: false, Default: 50000, MinInt: 1, MaxInt: 500000);
+        spec.Args["maxTables"] = new ToolArgSpec("maxTables", ToolArgType.Int, Required: false, Default: 20, MinInt: 1, MaxInt: 100);
+
+        spec.Args["maxColumns"] = new ToolArgSpec("maxColumns", ToolArgType.Int, Required: false, Default: 100, MinInt: 1, MaxInt: 500);
+        spec.Args["maxDisplayRows"] = new ToolArgSpec("maxDisplayRows", ToolArgType.Int, Required: false, Default: 2000, MinInt: 1, MaxInt: 20000);
+        spec.Args["previewRows"] = new ToolArgSpec("previewRows", ToolArgType.Int, Required: false, Default: 100, MinInt: 0, MaxInt: 200);
         return spec;
     }
 

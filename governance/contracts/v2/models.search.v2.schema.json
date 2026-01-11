@@ -76,6 +76,38 @@
         },
         "table": {
           "$ref": "tabular.data.v1.schema.json"
+        },
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "columns",
+            "unknownColumns"
+          ],
+          "properties": {
+            "columns": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": { "type": "string" },
+                  "vi": { "type": ["string", "null"] },
+                  "en": { "type": ["string", "null"] },
+                  "role": { "type": ["string", "null"] },
+                  "unit": { "type": ["string", "null"] },
+                  "notes": { "type": ["string", "null"] }
+                }
+              }
+            },
+            "unknownColumns": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
         }
       }
     },

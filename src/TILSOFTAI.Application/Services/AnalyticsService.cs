@@ -83,6 +83,61 @@ public sealed class AnalyticsService
         return result;
     }
 
+
+    /// <summary>
+    /// Creates a short-lived analytics dataset from an already materialized TabularData.
+    /// This is used by "AtomicQuery" stored procedures that return multiple raw tables (RS2..N).
+    /// </summary>
+    public async Task<DatasetCreateResult> CreateDatasetFromTabularAsync(
+        string source,
+        TabularData tabular,
+        DatasetBounds bounds,
+        TSExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(source)) throw new ArgumentException("source is required.");
+        if (tabular is null) throw new ArgumentNullException(nameof(tabular));
+
+        source = source.Trim().ToLowerInvariant();
+        bounds = bounds.WithDefaults();
+
+        // Build DataFrame
+        var df = TabularDataFrameBuilder.Build(tabular);
+
+        var datasetId = Guid.NewGuid().ToString("N");
+        var dataset = new AnalyticsDataset(
+            DatasetId: datasetId,
+            Source: source,
+            TenantId: context.TenantId,
+            UserId: context.UserId,
+            CreatedAtUtc: DateTimeOffset.UtcNow,
+            Data: df);
+
+        await _datasetStore.StoreAsync(datasetId, dataset, DefaultDatasetTtl, cancellationToken);
+
+        var schema = DescribeSchema(df);
+        var previewRows = bounds.PreviewRows <= 0 ? 0 : Math.Min(bounds.PreviewRows, tabular.Rows.Count);
+        var preview = previewRows == 0 ? Array.Empty<object?[]>() : tabular.Rows.Take(previewRows).ToArray();
+
+        var result = new DatasetCreateResult(
+            DatasetId: datasetId,
+            Source: source,
+            RowCount: tabular.Rows.Count,
+            ColumnCount: tabular.Columns.Count,
+            Schema: schema,
+            Preview: preview,
+            ExpiresAtUtc: dataset.CreatedAtUtc.Add(DefaultDatasetTtl));
+
+        await _auditLogger.LogToolExecutionAsync(
+            context,
+            "atomic.query.execute",
+            new { source, bounds },
+            new { result.RowCount, result.ColumnCount },
+            cancellationToken);
+
+        return result;
+    }
+
     public async Task<RunResult> RunAsync(
         string datasetId,
         JsonElement pipeline,

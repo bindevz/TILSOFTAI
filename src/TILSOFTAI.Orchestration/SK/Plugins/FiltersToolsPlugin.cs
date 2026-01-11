@@ -10,7 +10,7 @@ public sealed class FiltersToolsPlugin
     public FiltersToolsPlugin(ToolInvoker invoker) => _invoker = invoker;
 
     [KernelFunction("catalog")]
-    [Description("Trả về danh sách filters hợp lệ theo resource (vd: 'models.search', 'orders.query'). Nếu không truyền resource sẽ trả danh sách resources.")]
+    [Description("Trả về danh sách filters hợp lệ theo resource (vd: 'atomic.query.execute', 'analytics.run'). Nếu không truyền resource sẽ trả danh sách resources.")]
     public Task<object> CatalogAsync(string? resource = null, bool includeValues = false, CancellationToken ct = default)
         => _invoker.ExecuteAsync("filters.catalog", new { resource, includeValues }, ct);
 

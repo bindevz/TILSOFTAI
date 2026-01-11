@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tilsoftai://contracts/atomic.query.execute.v1",
+  "title": "atomic.query.execute.v1 response",
+  "description": "Generic AtomicQuery executor response (RS0 schema + RS1 summary + RS2..N tables routed to display or Atomic Data Engine datasets).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schemaVersion",
+    "generatedAtUtc",
+    "resource",
+    "data",
+    "warnings"
+  ],
+  "properties": {
+    "kind": {
+      "const": "atomic.query.execute.v1"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "generatedAtUtc": {
+      "type": "string"
+    },
+    "resource": {
+      "const": "atomic.query.execute"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "storedProcedure",
+        "schema",
+        "displayTables",
+        "engineDatasets"
+      ],
+      "properties": {
+        "storedProcedure": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "summary": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        },
+        "displayTables": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": [
+              "tableName",
+              "schema",
+              "table"
+            ],
+            "properties": {
+              "tableName": {
+                "type": "string"
+              },
+              "tableKind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "table": {
+                "$ref": "tilsoftai://contracts/tabular.data.v1"
+              }
+            }
+          }
+        },
+        "engineDatasets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": [
+              "datasetId",
+              "tableName",
+              "semanticSchema",
+              "preview"
+            ],
+            "properties": {
+              "datasetId": {
+                "type": "string",
+                "minLength": 8
+              },
+              "tableName": {
+                "type": "string"
+              },
+              "semanticSchema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "preview": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "columns",
+                  "rows"
+                ],
+                "properties": {
+                  "columns": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "rows": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean",
+                          "object",
+                          "array",
+                          "null"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

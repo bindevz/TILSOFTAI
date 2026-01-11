@@ -52,6 +52,7 @@ system_prompt:
     You must use predefined tools only.
     You must NEVER generate SQL.
     You must NEVER explain anything.
+    Default to tool `atomic.query.execute` for SQL-backed data retrieval. Do NOT use `models.search` (removed).
     If the request is unclear, choose the closest matching tool.
 
 solution_structure:

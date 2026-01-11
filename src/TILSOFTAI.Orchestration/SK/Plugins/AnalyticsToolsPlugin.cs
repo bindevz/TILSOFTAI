@@ -11,29 +11,6 @@ public sealed class AnalyticsToolsPlugin
 
     public AnalyticsToolsPlugin(ToolInvoker invoker) => _invoker = invoker;
 
-    [KernelFunction("dataset_create")]
-    [Description("Tạo dataset thô phía server (Atomic Data Engine). Trả về datasetId + schema + preview nhỏ.")]
-    public Task<object> CreateDatasetAsync(
-        [Description("Nguồn dữ liệu. Ver23 hỗ trợ: 'models'.")]
-        string source = "models",
-        [Description("Bộ lọc (dictionary key/value). Keys phải lấy từ filters-catalog với resource='analytics.dataset.create'.")]
-        Dictionary<string, string?>? filters = null,
-        [Description("Danh sách cột cần lấy (JSON array of strings). Nếu bỏ trống sẽ lấy default.")]
-        JsonElement? select = null,
-        int maxRows = 20000,
-        int maxColumns = 40,
-        int previewRows = 100,
-        CancellationToken ct = default)
-        => _invoker.ExecuteAsync("analytics.dataset.create", new
-        {
-            source,
-            filters = filters ?? new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase),
-            select,
-            maxRows,
-            maxColumns,
-            previewRows
-        }, ct);
-
     [KernelFunction("run")]
     [Description("Chạy pipeline phân tích (groupBy/sort/topN/select/filter) trên datasetId.")]
     public Task<object> RunAsync(
@@ -45,4 +22,32 @@ public sealed class AnalyticsToolsPlugin
         int maxResultRows = 500,
         CancellationToken ct = default)
         => _invoker.ExecuteAsync("analytics.run", new { datasetId, pipeline, topN, maxGroups, maxResultRows }, ct);
+
+    [KernelFunction("atomic_query_execute")]
+    [Description("Thực thi stored procedure theo chuẩn AtomicQuery (RS0 schema, RS1 summary, RS2..N data tables). Tự routing theo RS0.delivery/tableKind: trả displayTables và/hoặc engineDatasets (datasetId) cho Atomic Data Engine.")]
+    public Task<object> AtomicQueryExecuteAsync(
+        [Description("Tên stored procedure. Bắt buộc: dbo.TILSOFTAI_sp_*")]
+        string spName,
+        [Description("Tham số SP dạng JSON object. Key là tên tham số (có thể bỏ '@').")]
+        JsonElement? @params = null,
+        int maxRowsPerTable = 20000,
+        int maxRowsSummary = 500,
+        int maxSchemaRows = 50000,
+        int maxTables = 20,
+        int maxColumns = 100,
+        int maxDisplayRows = 2000,
+        int previewRows = 100,
+        CancellationToken ct = default)
+        => _invoker.ExecuteAsync("atomic.query.execute", new
+        {
+            spName,
+            @params,
+            maxRowsPerTable,
+            maxRowsSummary,
+            maxSchemaRows,
+            maxTables,
+            maxColumns,
+            maxDisplayRows,
+            previewRows
+        }, ct);
 }

@@ -1,0 +1,362 @@
+using System.Text.Json;
+using TILSOFTAI.Application.Services;
+using TILSOFTAI.Domain.ValueObjects;
+using TILSOFTAI.Orchestration.Tools;
+using TILSOFTAI.Orchestration.Tools.Modularity;
+
+namespace TILSOFTAI.Orchestration.Modules.Analytics.Handlers;
+
+/// <summary>
+/// Generic executor for stored procedures that follow "TILSOFTAI_sp_AtomicQuery_Template":
+/// RS0 schema, RS1 summary (optional), RS2..N raw tables.
+///
+/// Routing rules:
+/// - Prefer RS0.resultset.delivery when present: engine|display|both|auto
+/// - Otherwise fallback to tableKind heuristic:
+///     summary/dimension/lookup => display
+///     fact/raw/bridge/timeseries => engine
+/// - Fail-closed: unknown => engine
+/// </summary>
+public sealed class AtomicQueryExecuteToolHandler : IToolHandler
+{
+    public string ToolName => "atomic.query.execute";
+
+    private readonly AtomicQueryService _atomicQueryService;
+    private readonly AnalyticsService _analyticsService;
+
+    public AtomicQueryExecuteToolHandler(AtomicQueryService atomicQueryService, AnalyticsService analyticsService)
+    {
+        _atomicQueryService = atomicQueryService;
+        _analyticsService = analyticsService;
+    }
+
+    public async Task<ToolDispatchResult> HandleAsync(object intent, TSExecutionContext context, CancellationToken cancellationToken)
+    {
+        var dyn = (DynamicToolIntent)intent;
+
+        var spName = NormalizeStoredProcedureName(dyn.GetStringRequired("spName"));
+        var readOptions = new AtomicQueryReadOptions(
+            MaxRowsPerTable: dyn.GetInt("maxRowsPerTable", 20000),
+            MaxRowsSummary: dyn.GetInt("maxRowsSummary", 500),
+            MaxSchemaRows: dyn.GetInt("maxSchemaRows", 50000),
+            MaxTables: dyn.GetInt("maxTables", 20));
+
+        var maxColumns = dyn.GetInt("maxColumns", 100);
+        var previewRows = dyn.GetInt("previewRows", 100);
+        var maxDisplayRows = dyn.GetInt("maxDisplayRows", 2000);
+
+        var routing = RoutingPolicyOptions.Default with
+        {
+            MaxDisplayRows = Math.Clamp(maxDisplayRows, 1, readOptions.MaxRowsPerTable),
+            MaxDisplayColumns = Math.Clamp(maxColumns, 1, 500)
+        };
+
+        var parameters = ParseSqlParameters(dyn.GetJson("params"));
+
+        var atomic = await _atomicQueryService.ExecuteAsync(spName, parameters, readOptions, cancellationToken);
+
+        // Summary (RS1) is always safe to display (bounded by MaxRowsSummary).
+        var summaryPayload = atomic.Summary is null ? null : new
+        {
+            index = atomic.Summary.Schema.Index,
+            tableName = atomic.Summary.Schema.TableName,
+            tableKind = atomic.Summary.Schema.TableKind,
+            schema = atomic.Summary.Schema,
+            table = TrimColumns(atomic.Summary.Table, maxColumns)
+        };
+
+        var displayTables = new List<object>();
+        var engineDatasets = new List<object>();
+        var warnings = new List<string>();
+
+        foreach (var t in atomic.Tables)
+        {
+            var trimmedTable = TrimColumns(t.Table, maxColumns);
+            var stats = TableStats.From(trimmedTable);
+            var decision = DecideDelivery(t.Schema, stats, routing);
+
+            if (decision.Display)
+            {
+                var displayTable = TrimRows(trimmedTable, routing.MaxDisplayRows);
+                var displayTrunc = new
+                {
+                    rows = new { returned = displayTable.Rows.Count, max = routing.MaxDisplayRows, original = trimmedTable.Rows.Count },
+                    columns = new { returned = displayTable.Columns.Count, max = maxColumns, original = t.Table.Columns.Count }
+                };
+
+                displayTables.Add(new
+                {
+                    index = t.Schema.Index,
+                    tableName = t.Schema.TableName,
+                    tableKind = t.Schema.TableKind,
+                    delivery = t.Schema.Delivery ?? "auto",
+                    grain = t.Schema.Grain,
+                    primaryKey = t.Schema.PrimaryKey,
+                    joinHints = t.Schema.JoinHints,
+                    description_vi = t.Schema.DescriptionVi,
+                    description_en = t.Schema.DescriptionEn,
+                    schema = t.Schema,
+                    routingReason = decision.Reason,
+                    truncation = displayTrunc,
+                    table = displayTable
+                });
+
+                if (displayTable.Rows.Count < trimmedTable.Rows.Count)
+                    warnings.Add($"Display table '{t.Schema.TableName}' was truncated to {displayTable.Rows.Count} rows (maxDisplayRows={routing.MaxDisplayRows}). Use engineDatasets + analytics.run for full analysis.");
+            }
+
+            if (decision.Engine)
+            {
+                // Create short-lived dataset from table for AtomicDataEngine.
+                var bounds = new AnalyticsService.DatasetBounds(
+                    MaxRows: Math.Min(trimmedTable.Rows.Count, readOptions.MaxRowsPerTable),
+                    MaxColumns: maxColumns,
+                    PreviewRows: previewRows);
+
+                var dataset = await _analyticsService.CreateDatasetFromTabularAsync(
+                    source: "atomic",
+                    tabular: trimmedTable,
+                    bounds: bounds,
+                    context: context,
+                    cancellationToken: cancellationToken);
+
+                engineDatasets.Add(new
+                {
+                    index = t.Schema.Index,
+                    tableName = t.Schema.TableName,
+                    tableKind = t.Schema.TableKind,
+                    delivery = t.Schema.Delivery ?? "auto",
+                    routingReason = decision.Reason,
+                    datasetId = dataset.DatasetId,
+                    expiresAtUtc = dataset.ExpiresAtUtc,
+                    semanticSchema = t.Schema,
+                    dataSchema = dataset.Schema,
+                    preview = new
+                    {
+                        columns = dataset.Schema.Select(c => c.Name),
+                        rows = dataset.Preview
+                    }
+                });
+            }
+        }
+
+        if (displayTables.Count == 0 && engineDatasets.Count == 0)
+            warnings.Add("No data tables returned (RS2..RSN). Ensure RS0 declares at least one non-summary result set.");
+
+        // Protect against accidental token bloat.
+        if (displayTables.Count > 0)
+            warnings.Add("Display tables are bounded. For large analysis prefer engineDatasets + analytics.run.");
+
+        var payload = new
+        {
+            kind = "atomic.query.execute.v1",
+            schemaVersion = 1,
+            generatedAtUtc = DateTimeOffset.UtcNow,
+            resource = "atomic.query.execute",
+            data = new
+            {
+                storedProcedure = spName,
+                schema = atomic.Schema,
+                summary = summaryPayload,
+                displayTables,
+                engineDatasets
+            },
+            warnings = warnings.ToArray()
+        };
+
+        return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateSuccess("atomic.query.execute executed", payload));
+    }
+
+    private static string NormalizeStoredProcedureName(string input)
+    {
+        var sp = input.Trim();
+        if (!sp.Contains('.', StringComparison.Ordinal))
+            sp = "dbo." + sp;
+
+        // Fail-closed: allow only dbo.<identifier> and must start with dbo.TILSOFTAI_sp_
+        if (!sp.StartsWith("dbo.", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("spName must be under schema 'dbo'.");
+
+        if (!sp.StartsWith("dbo.TILSOFTAI_sp_", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("spName must start with dbo.TILSOFTAI_sp_.");
+
+        // defensive: restrict characters
+        for (var i = 0; i < sp.Length; i++)
+        {
+            var ch = sp[i];
+            var ok = char.IsLetterOrDigit(ch) || ch == '_' || ch == '.';
+            if (!ok)
+                throw new ArgumentException("spName contains invalid characters.");
+        }
+
+        return sp;
+    }
+
+    private static IReadOnlyDictionary<string, object?> ParseSqlParameters(JsonElement? je)
+    {
+        if (je is null || je.Value.ValueKind == JsonValueKind.Undefined || je.Value.ValueKind == JsonValueKind.Null)
+            return new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
+        if (je.Value.ValueKind != JsonValueKind.Object)
+            throw new ArgumentException("params must be a JSON object.");
+
+        var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var prop in je.Value.EnumerateObject())
+        {
+            dict[prop.Name] = ConvertJsonValue(prop.Value);
+        }
+
+        return dict;
+    }
+
+    private static object? ConvertJsonValue(JsonElement v)
+    {
+        switch (v.ValueKind)
+        {
+            case JsonValueKind.Null:
+            case JsonValueKind.Undefined:
+                return null;
+
+            case JsonValueKind.String:
+                return v.GetString();
+
+            case JsonValueKind.True:
+            case JsonValueKind.False:
+                return v.GetBoolean();
+
+            case JsonValueKind.Number:
+                // Prefer int when possible, else long, else decimal.
+                if (v.TryGetInt32(out var i)) return i;
+                if (v.TryGetInt64(out var l)) return l;
+                if (v.TryGetDecimal(out var d)) return d;
+                return v.GetDouble();
+
+            case JsonValueKind.Object:
+            case JsonValueKind.Array:
+                // Pass JSON payload as string; SQL can accept NVARCHAR(MAX) JSON if needed.
+                return v.GetRawText();
+
+            default:
+                return v.GetRawText();
+        }
+    }
+
+    private static RoutingDecision DecideDelivery(AtomicResultSetSchema schema, TableStats stats, RoutingPolicyOptions policy)
+    {
+        var delivery = (schema.Delivery ?? "auto").Trim().ToLowerInvariant();
+        var kind = (schema.TableKind ?? string.Empty).Trim().ToLowerInvariant();
+
+        var sizeTooLargeForDisplay =
+            stats.RowCount > policy.HardMaxDisplayRows ||
+            stats.ColCount > policy.MaxDisplayColumns ||
+            stats.CellCount > policy.MaxDisplayCells;
+
+        // 1) Explicit delivery directive in RS0 (preferred)
+        if (delivery == "engine")
+            return new RoutingDecision(Engine: true, Display: false, Reason: "RS0.delivery=engine");
+
+        if (delivery == "display")
+        {
+            // Guardrail: if too large, convert to BOTH so user can still analyze.
+            if (sizeTooLargeForDisplay)
+                return new RoutingDecision(Engine: true, Display: true, Reason: "RS0.delivery=display but table is large => both (display truncated + engine dataset)");
+            return new RoutingDecision(Engine: false, Display: true, Reason: "RS0.delivery=display");
+        }
+
+        if (delivery == "both")
+            return new RoutingDecision(Engine: true, Display: true, Reason: "RS0.delivery=both");
+
+        // 2) Auto routing by tableKind + size heuristics
+        var displayPreferred = kind is "summary" or "dimension" or "lookup" or "kpi" or "report";
+        var enginePreferred = kind is "fact" or "raw" or "bridge" or "timeseries" or "transaction";
+
+        if (displayPreferred)
+        {
+            if (sizeTooLargeForDisplay)
+                return new RoutingDecision(Engine: true, Display: true, Reason: $"tableKind={kind} display-preferred but large => both (display truncated + engine dataset)");
+            return new RoutingDecision(Engine: false, Display: true, Reason: $"tableKind={kind} => display");
+        }
+
+        if (enginePreferred)
+        {
+            // If small, show + also create dataset (helps debugging and UX)
+            if (stats.RowCount <= policy.SmallTableRowsForBoth && stats.CellCount <= policy.SmallTableCellsForBoth)
+                return new RoutingDecision(Engine: true, Display: true, Reason: $"tableKind={kind} engine-preferred but small => both");
+
+            return new RoutingDecision(Engine: true, Display: false, Reason: $"tableKind={kind} => engine");
+        }
+
+        // 3) Unknown kinds: fail-closed to engine; allow BOTH only when table is tiny.
+        if (stats.RowCount <= policy.TinyTableRowsForBoth && stats.CellCount <= policy.TinyTableCellsForBoth)
+            return new RoutingDecision(Engine: true, Display: true, Reason: "unknown tableKind but tiny => both");
+
+        return new RoutingDecision(Engine: true, Display: false, Reason: "unknown tableKind => engine (fail-closed)");
+    }
+
+    private static TabularData TrimRows(TabularData table, int maxRows)
+    {
+        maxRows = Math.Clamp(maxRows, 0, 200000);
+        if (maxRows == 0 || table.Rows.Count <= maxRows)
+            return table;
+
+        var rows = table.Rows.Take(maxRows).ToArray();
+        return new TabularData(table.Columns, rows, table.TotalCount);
+    }
+
+    private sealed record RoutingDecision(bool Engine, bool Display, string Reason);
+
+    private sealed record RoutingPolicyOptions(
+        int MaxDisplayRows,
+        int HardMaxDisplayRows,
+        int MaxDisplayColumns,
+        long MaxDisplayCells,
+        int SmallTableRowsForBoth,
+        long SmallTableCellsForBoth,
+        int TinyTableRowsForBoth,
+        long TinyTableCellsForBoth)
+    {
+        public static RoutingPolicyOptions Default => new(
+            MaxDisplayRows: 2000,
+            HardMaxDisplayRows: 5000,
+            MaxDisplayColumns: 60,
+            MaxDisplayCells: 120_000,
+            SmallTableRowsForBoth: 250,
+            SmallTableCellsForBoth: 25_000,
+            TinyTableRowsForBoth: 50,
+            TinyTableCellsForBoth: 5_000);
+    }
+
+    private sealed record TableStats(int RowCount, int ColCount, long CellCount)
+    {
+        public static TableStats From(TabularData table)
+        {
+            var rows = table.Rows.Count;
+            var cols = table.Columns.Count;
+            return new TableStats(rows, cols, (long)rows * cols);
+        }
+    }
+
+    private static TabularData TrimColumns(TabularData table, int maxColumns)
+    {
+        maxColumns = Math.Clamp(maxColumns, 1, 500);
+        if (table.Columns.Count <= maxColumns)
+            return table;
+
+        var keep = table.Columns.Take(maxColumns).ToArray();
+        var keptIdx = Enumerable.Range(0, maxColumns).ToArray();
+
+        var rows = new object?[table.Rows.Count][];
+        for (var r = 0; r < table.Rows.Count; r++)
+        {
+            var src = table.Rows[r];
+            var dst = new object?[maxColumns];
+            for (var c = 0; c < maxColumns; c++)
+                dst[c] = src[keptIdx[c]];
+            rows[r] = dst;
+        }
+
+        return new TabularData(keep, rows, table.TotalCount);
+    }
+
+    
+}

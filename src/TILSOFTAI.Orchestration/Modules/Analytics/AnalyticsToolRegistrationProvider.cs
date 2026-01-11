@@ -14,11 +14,11 @@ public sealed class AnalyticsToolRegistrationProvider : IToolRegistrationProvide
 
     public IEnumerable<ToolDefinition> GetToolDefinitions()
     {
-        yield return Dynamic("analytics.dataset.create", requiresWrite: false,
-            allowed: new[] { "filters", "source", "select", "maxRows", "maxColumns", "previewRows" });
-
         yield return Dynamic("analytics.run", requiresWrite: false,
             allowed: new[] { "datasetId", "pipeline", "topN", "maxGroups", "maxResultRows" });
+
+        yield return Dynamic("atomic.query.execute", requiresWrite: false,
+            allowed: new[] { "spName", "params", "maxRowsPerTable", "maxRowsSummary", "maxSchemaRows", "maxTables", "maxColumns", "maxDisplayRows", "previewRows" });
     }
 
     private ToolDefinition Dynamic(string toolName, bool requiresWrite, IEnumerable<string> allowed)
