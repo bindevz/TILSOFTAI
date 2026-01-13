@@ -14,6 +14,13 @@ public sealed class HeuristicLanguageResolver : ILanguageResolver
         @"(?i)\b(how many|what|which|show|list|count|season|collection|model|customer|order|price|in the system|with)\b",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    private static readonly Regex ViSignals = new(
+        // Vietnamese signals (including no-diacritic variants). Avoid English-only tokens like "season"/"collection"
+        // to prevent misclassification when the user asks in English.
+        @"(?i)\b(bao\s*nhieu|bao\s*nhieu\?|dem|đếm|so\s*luong|so\s*luong\s*bao\s*nhieu|tong\s*so|mua|mùa|bo\s*suu\s*tap|bộ\s*sưu\s*tập|khach\s*hang|khách\s*hàng|don\s*hang|đơn\s*hàng|gia|giá|tim|tìm|liet\s*ke|liệt\s*kê|danh\s*sach|danh\s*sách)\b",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+
     public ChatLanguage Resolve(IReadOnlyCollection<ChatCompletionMessage> incomingMessages, ConversationState? conversationState)
     {
         // Use the last non-empty user message as primary signal.
@@ -24,6 +31,7 @@ public sealed class HeuristicLanguageResolver : ILanguageResolver
         if (!string.IsNullOrWhiteSpace(lastUser))
         {
             if (ContainsVietnameseDiacritics(lastUser)) return ChatLanguage.Vi;
+            if (ViSignals.IsMatch(lastUser)) return ChatLanguage.Vi;
             if (EnSignals.IsMatch(lastUser)) return ChatLanguage.En;
         }
 
@@ -33,8 +41,8 @@ public sealed class HeuristicLanguageResolver : ILanguageResolver
             return ChatLanguageExtensions.FromIsoCode(conversationState.PreferredLanguage);
         }
 
-        // Default to Vietnamese.
-        return ChatLanguage.Vi;
+        // Default to English.
+        return ChatLanguage.En;
     }
 
     private static bool ContainsVietnameseDiacritics(string text)

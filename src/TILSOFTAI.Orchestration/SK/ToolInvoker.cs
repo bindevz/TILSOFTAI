@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using TILSOFTAI.Application.Permissions;
 using TILSOFTAI.Orchestration.Contracts;
+using TILSOFTAI.Orchestration.Contracts.Evidence;
 using TILSOFTAI.Orchestration.Contracts.Validation;
 using TILSOFTAI.Orchestration.Llm;
 using TILSOFTAI.Orchestration.SK.Conversation;
@@ -130,6 +131,12 @@ public sealed class ToolInvoker
 
             // Update conversation state for follow-up turns (only for successful READ queries)
             await TryUpdateConversationStateAsync(toolName, normalizedIntent, requiresWrite, ct);
+
+            // Fallback (anti-loop): if the handler did not attach evidence, synthesize a compact one.
+            // Some clients/UI layers render only envelope.evidence; returning an empty list causes
+            // the assistant to retry tools and the user sees no answer.
+            if (evidence is null || evidence.Count == 0)
+                evidence = EvidenceFallbackBuilder.Build(lastPayload);
 
             return EnvelopeV1.Success(toolName, requiresWrite, _ctx.Context,
                 telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),

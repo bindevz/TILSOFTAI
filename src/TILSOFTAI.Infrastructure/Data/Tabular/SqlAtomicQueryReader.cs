@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Linq;
 using TILSOFTAI.Domain.ValueObjects;
 
 namespace TILSOFTAI.Infrastructure.Data.Tabular;
@@ -36,36 +37,108 @@ public static class SqlAtomicQueryReader
         var tables = new List<AtomicResultSet>();
         AtomicResultSet? summary = null;
 
-        // Schema declares indices starting from 1 (RS1=1). We'll read in ascending order.
+        
+        // Schema declares indices starting from 1 (RS1=1). We'll read in ascending order when schema is present.
         var ordered = schema.ResultSets.OrderBy(x => x.Index).ToList();
 
-        // If there is no declared result set, we still try to read remaining as one data set (index=1).
-        if (ordered.Count == 0)
-            ordered.Add(new AtomicResultSetSchema(Index: 1, TableName: "data"));
-
-        foreach (var rs in ordered)
+        if (ordered.Count > 0)
         {
-            if (!await reader.NextResultAsync(cancellationToken))
-                break;
+            foreach (var rs in ordered)
+            {
+                if (!await reader.NextResultAsync(cancellationToken))
+                    break;
 
-            var maxRows = rs.TableKind?.Equals("summary", StringComparison.OrdinalIgnoreCase) == true
-                ? options.MaxRowsSummary
-                : options.MaxRowsPerTable;
+                var maxRows = rs.TableKind?.Equals("summary", StringComparison.OrdinalIgnoreCase) == true
+                    ? options.MaxRowsSummary
+                    : options.MaxRowsPerTable;
 
-            var table = await DbDataReaderTabularMaterializer.ReadAsync(reader, maxRows, cancellationToken);
+                var table = await DbDataReaderTabularMaterializer.ReadAsync(reader, maxRows, cancellationToken);
 
-            // Bind unknown columns by name.
+                // Bind unknown columns by name.
+                var boundSchema = BindUnknownColumns(rs, table.Columns);
+
+                var item = new AtomicResultSet(boundSchema, table);
+
+                if (rs.TableKind?.Equals("summary", StringComparison.OrdinalIgnoreCase) == true ||
+                    rs.TableName.Equals("summary", StringComparison.OrdinalIgnoreCase))
+                    summary = item;
+                else
+                    tables.Add(item);
+            }
+
+            return new AtomicQueryResult(schema, summary, tables);
+        }
+
+        // Fallback: RS0 schema is missing or unreadable.
+        // In this case, we still need to return something useful to the caller (and avoid "empty evidence" loops).
+        // Strategy: read ALL remaining result sets sequentially, infer a minimal schema per result set, and mark
+        // a small 1-row table containing common count/hint columns as "summary".
+        var fallbackResultSets = new List<AtomicResultSetSchema>();
+        var fallbackIndex = 1;
+
+        while (await reader.NextResultAsync(cancellationToken))
+        {
+            var table = await DbDataReaderTabularMaterializer.ReadAsync(reader, options.MaxRowsPerTable, cancellationToken);
+
+            var kindGuess = GuessTableKind(table);
+            var rs = new AtomicResultSetSchema(
+                Index: fallbackIndex,
+                TableName: $"rs{fallbackIndex}",
+                TableKind: kindGuess,
+                Delivery: "auto");
+
+            fallbackResultSets.Add(rs);
+
             var boundSchema = BindUnknownColumns(rs, table.Columns);
-
             var item = new AtomicResultSet(boundSchema, table);
 
-            if (rs.TableKind?.Equals("summary", StringComparison.OrdinalIgnoreCase) == true || rs.Index == 1 && rs.TableName.Equals("summary", StringComparison.OrdinalIgnoreCase))
+            if (kindGuess == "summary" && summary is null)
                 summary = item;
             else
                 tables.Add(item);
+
+            fallbackIndex++;
         }
 
-        return new AtomicQueryResult(schema, summary, tables);
+        var fallbackSchema = new AtomicQuerySchema(fallbackResultSets);
+        return new AtomicQueryResult(fallbackSchema, summary, tables);
+
+    }
+
+    /// <summary>
+    /// Best-effort classification used only when RS0 schema is missing/unreadable.
+    /// We keep this heuristic conservative to avoid mislabeling datasets.
+    /// </summary>
+    private static string? GuessTableKind(TabularData table)
+    {
+        if (table.Rows is null || table.Rows.Count == 0) return null;
+
+        // Heuristic: summary tables are usually very small and contain common control/count fields.
+        if (table.Rows.Count <= 5)
+        {
+            var names = table.Columns
+                .Select(c => c.Name)
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .Select(n => n.Trim())
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            // Common summary signals in TILSOFT atomic SPs.
+            var summarySignals = new[]
+            {
+                "totalCount", "count", "rowCount", "total", "isDatasetMode",
+                "page", "size", "engineRows", "displayRows",
+                "seasonFilter", "collectionFilter", "rangeNameFilter"
+            };
+
+            if (summarySignals.Any(s => names.Contains(s)))
+                return "summary";
+
+            // Fallback: if it has only a few scalar columns, treat as summary.
+            if (table.Columns.Count <= 12)
+                return "summary";
+        }
+
+        return null;
     }
 
     // -----------------------------

@@ -20,6 +20,7 @@ public sealed class DefaultChatTextLocalizer : IChatTextLocalizer
             ChatTextKeys.NoToolsMode => lang == ChatLanguage.En ? NoToolsModeEn : NoToolsModeVi,
             ChatTextKeys.SynthesizeNoTools => lang == ChatLanguage.En ? SynthesizeNoToolsEn : SynthesizeNoToolsVi,
             ChatTextKeys.PreviousQueryHint => lang == ChatLanguage.En ? PreviousQueryHintEn : PreviousQueryHintVi,
+            ChatTextKeys.FallbackNoContent => lang == ChatLanguage.En ? FallbackNoContentEn : FallbackNoContentVi,
             _ => string.Empty
         };
     }
@@ -28,9 +29,10 @@ public sealed class DefaultChatTextLocalizer : IChatTextLocalizer
     private const string SystemPromptVi = """
 Bạn là trợ lý nghiệp vụ ERP.
 
-Ngôn ngữ: Trả lời bằng tiếng Việt.
+Ngôn ngữ: Trả lời theo ngôn ngữ của người dùng (dựa trên tin nhắn gần nhất). Nếu không chắc, mặc định tiếng Anh.
 
 Quy tắc:
+- Khi người dùng cung cấp season dạng "24/25", "24-25", "2024/25"..., hãy chuẩn hóa về "YYYY/YYYY" (ví dụ: "24/25" -> "2024/2025") trước khi đặt vào tham số Season.
 - Nếu câu hỏi cần dữ liệu nội bộ (model/khách hàng/đơn hàng/giá/tồn kho...), hãy dùng tools được cung cấp. Không bịa số liệu nếu chưa có evidence từ tool.
 - Nếu cần chạy stored procedure theo chuẩn AtomicQuery mà chưa chắc spName, hãy gọi atomic_catalog_search trước để tìm đúng spName rồi mới gọi atomic_query_execute.
 - Nếu không chắc filters/hành động hợp lệ, dùng filters-catalog / actions-catalog.
@@ -42,9 +44,10 @@ Quy tắc:
     private const string SystemPromptEn = """
 You are an ERP business assistant.
 
-Language: Reply in English.
+Language: Reply in the user's language (based on the most recent user message). If uncertain, default to English.
 
 Rules:
+- When the user provides a season like "24/25", "24-25", "2024/25"..., normalize it to "YYYY/YYYY" (e.g., "24/25" -> "2024/2025") before setting the Season parameter.
 - If the question requires internal data (models/customers/orders/prices/inventory...), use the provided tools. Do not fabricate numbers without tool evidence.
 - If you need to execute an AtomicQuery stored procedure but are not sure about spName, call atomic_catalog_search first to find the best spName, then call atomic_query_execute.
 - If you are unsure about valid filters or write parameters, use filters-catalog / actions-catalog.
@@ -64,4 +67,8 @@ Rules:
 
     private const string PreviousQueryHintVi = "Ngữ cảnh truy vấn trước đó (dùng để hiểu câu hỏi nối tiếp): ";
     private const string PreviousQueryHintEn = "Previous query context (to understand the follow-up question): ";
+
+    // Last-resort response to avoid sending an empty assistant message to the client.
+    private const string FallbackNoContentVi = "Tôi chưa thể tạo câu trả lời ở thời điểm này. Vui lòng thử lại hoặc cung cấp thêm chi tiết.";
+    private const string FallbackNoContentEn = "I could not produce an answer at this time. Please retry or provide more details.";
 }

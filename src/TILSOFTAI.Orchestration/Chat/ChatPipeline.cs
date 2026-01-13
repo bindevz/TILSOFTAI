@@ -322,7 +322,10 @@ public sealed class ChatPipeline
         history.AddSystemMessage(_localizer.Get(ChatTextKeys.NoToolsMode, lang));
 
         var msg2 = await chat2.GetChatMessageContentAsync(history, new OpenAIPromptExecutionSettings { Temperature = (float)_tuning.NoToolsTemperature }, kernel2, cancellationToken);
-        return (msg2.Content ?? string.Empty).Trim();
+        var final = (msg2.Content ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(final))
+            final = _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
+        return final;
     }
 
     private async Task<string> SynthesizeWithoutToolsAsync(
@@ -338,7 +341,10 @@ public sealed class ChatPipeline
         var kernel2 = _kernelFactory.CreateKernel(requestedModel);
         var chat2 = kernel2.GetRequiredService<IChatCompletionService>();
         var msg2 = await chat2.GetChatMessageContentAsync(history, new OpenAIPromptExecutionSettings { Temperature = (float)_tuning.SynthesisTemperature }, kernel2, cancellationToken);
-        return (msg2.Content ?? string.Empty).Trim();
+        var final = (msg2.Content ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(final))
+            final = _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
+        return final;
     }
 
     private ChatCompletionResponse BuildFailureResponse(string error, string? model, IReadOnlyCollection<ChatCompletionMessage> promptMessages)

@@ -14,6 +14,54 @@ namespace TILSOFTAI.Infrastructure.Repositories;
 /// </summary>
 public sealed class AtomicQueryRepository : IAtomicQueryRepository
 {
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTimeOffset fetchedAtUtc, HashSet<string> names)> _paramNameCache
+            = new(StringComparer.OrdinalIgnoreCase);
+
+        private static async Task<HashSet<string>?> TryGetStoredProcedureParamNamesAsync(
+            SqlConnection conn,
+            string storedProcedure,
+            CancellationToken cancellationToken)
+        {
+            // Cache per database + procedure to avoid repeated sys lookups.
+            var key = $"{conn.DataSource}|{conn.Database}|{storedProcedure}".ToLowerInvariant();
+
+            if (_paramNameCache.TryGetValue(key, out var cached) &&
+                (DateTimeOffset.UtcNow - cached.fetchedAtUtc) < TimeSpan.FromMinutes(10))
+            {
+                return cached.names;
+            }
+
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+SELECT p.name
+FROM sys.parameters p
+WHERE p.object_id = OBJECT_ID(@spName)
+  AND p.is_output = 0
+  AND p.name <> '@RETURN_VALUE';";
+            cmd.CommandType = CommandType.Text;
+            cmd.CommandTimeout = 10;
+            cmd.Parameters.Add(new SqlParameter("@spName", SqlDbType.NVarChar, 256) { Value = storedProcedure });
+
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (!reader.IsDBNull(0))
+                {
+                    var name = reader.GetString(0);
+                    if (!string.IsNullOrWhiteSpace(name))
+                        set.Add(name.Trim());
+                }
+            }
+
+            if (set.Count == 0)
+                return null;
+
+            _paramNameCache[key] = (DateTimeOffset.UtcNow, set);
+            return set;
+        }
+
     private readonly SqlServerDbContext _dbContext;
 
     public AtomicQueryRepository(SqlServerDbContext dbContext)
@@ -36,6 +84,16 @@ public sealed class AtomicQueryRepository : IAtomicQueryRepository
         cmd.CommandType = CommandType.StoredProcedure;
         cmd.CommandTimeout = 60;
 
+        HashSet<string>? actualParamNames = null;
+        try
+        {
+            actualParamNames = await TryGetStoredProcedureParamNamesAsync(conn, storedProcedure, cancellationToken);
+        }
+        catch
+        {
+            // Best-effort only. If sys metadata is unavailable (permissions), we fall back to trusting input.
+        }
+
         if (parameters is not null)
         {
             foreach (var kv in parameters)
@@ -46,6 +104,13 @@ public sealed class AtomicQueryRepository : IAtomicQueryRepository
 
                 if (!name.StartsWith("@", StringComparison.Ordinal))
                     name = "@" + name;
+
+                if (actualParamNames is not null && actualParamNames.Count > 0 && !actualParamNames.Contains(name))
+                {
+                    // Unknown parameter for this stored procedure; ignore to avoid SQL errors.
+                    continue;
+                }
+
 
                 var value = kv.Value ?? DBNull.Value;
                 cmd.Parameters.Add(new SqlParameter(name, value));

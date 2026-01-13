@@ -1,6 +1,8 @@
 using System.Text.Json;
 using TILSOFTAI.Application.Services;
+using TILSOFTAI.Domain.Utilities;
 using TILSOFTAI.Domain.ValueObjects;
+using TILSOFTAI.Orchestration.Contracts;
 using TILSOFTAI.Orchestration.Tools;
 using TILSOFTAI.Orchestration.Tools.Modularity;
 
@@ -43,7 +45,49 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
         // Governance: allow only stored procedures registered in catalog.
         // Fail-closed: if not present/enabled/readonly/atomicCompatible => reject.
-        var catalogEntry = await _catalog.GetRequiredAllowedAsync(spName, cancellationToken);
+        AtomicCatalogEntry catalogEntry;
+        try
+        {
+            catalogEntry = await _catalog.GetRequiredAllowedAsync(spName, cancellationToken);
+        }
+        catch (ArgumentException ex)
+        {
+            // Fallback: do not return an empty tool output (which often causes the LLM to loop).
+            // Provide an actionable diagnostic so the assistant can respond to the user immediately.
+            var payloadEx = new
+            {
+                kind = "atomic.query.execute.v1",
+                schemaVersion = 2,
+                generatedAtUtc = DateTimeOffset.UtcNow,
+                resource = "atomic.query.execute",
+                data = new
+                {
+                    storedProcedure = spName,
+                    error = new
+                    {
+                        code = "catalog_not_allowed",
+                        message = ex.Message
+                    },
+                    hint = "Register and enable this stored procedure in dbo.TILSOFTAI_SPCatalog (IsEnabled=1, IsReadOnly=1, IsAtomicCompatible=1) then retry."
+                },
+                warnings = new[] { "Execution was blocked by catalog governance. No DB call was made." }
+            };
+
+            var blockedExtras = new ToolDispatchExtras(
+                Source: new EnvelopeSourceV1 { System = "registry", Name = "dbo.TILSOFTAI_SPCatalog", Cache = "na" },
+                Evidence:
+                [
+                    new EnvelopeEvidenceItemV1
+            {
+                Id = "error",
+                Type = "metric",
+                Title = "Execution blocked",
+                Payload = new { code = "catalog_not_allowed", message = ex.Message, spName }
+            }
+                ]);
+
+            return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateSuccess("atomic.query.execute blocked", payloadEx), blockedExtras);
+        }
         var readOptions = new AtomicQueryReadOptions(
             MaxRowsPerTable: dyn.GetInt("maxRowsPerTable", 20000),
             MaxRowsSummary: dyn.GetInt("maxRowsSummary", 500),
@@ -66,6 +110,10 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         var allowedParams = AtomicCatalogService.GetAllowedParamNames(catalogEntry.ParamsJson);
         var (filteredParams, droppedParams) = FilterParams(parameters, allowedParams);
 
+        // Normalize semantic parameters (e.g., Season) to improve compatibility with ERP conventions.
+        // This runs after governance filtering and before executing the stored procedure.
+        filteredParams = NormalizeSeasonParams(filteredParams);
+
         var atomic = await _atomicQueryService.ExecuteAsync(spName, filteredParams, readOptions, cancellationToken);
 
         // Summary (RS1) is always safe to display (bounded by MaxRowsSummary).
@@ -83,7 +131,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         var warnings = new List<string>();
 
         if (allowedParams.Count == 0)
-            warnings.Add($"Catalog allow-list for '{spName}' is empty. All provided params were dropped. Populate ParamsJson in dbo.TILSOFTAI_SPCatalog to enable governed parameters.");
+            warnings.Add($"Catalog allow-list for '{spName}' is empty/missing. Parameters were accepted, but unknown parameters may be ignored using SQL metadata. Populate ParamsJson in dbo.TILSOFTAI_SPCatalog for stronger governance and better LLM guidance.");
 
         if (droppedParams.Count > 0)
             warnings.Add($"Dropped {droppedParams.Count} unknown params (not in catalog allow-list) for '{spName}': {string.Join(", ", droppedParams)}");
@@ -190,7 +238,132 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
             warnings = warnings.ToArray()
         };
 
-        return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateSuccess("atomic.query.execute executed", payload));
+        // Evidence: provide a compact, stable slice so the client can always render an answer.
+        var evidence = BuildEvidenceFromAtomicResult(spName, atomic, displayTables.Count, engineDatasets.Count);
+
+        var extras = new ToolDispatchExtras(
+            Source: new EnvelopeSourceV1 { System = "sqlserver", Name = spName, Cache = "na" },
+            Evidence: evidence);
+
+        return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateSuccess("atomic.query.execute executed", payload), extras);
+    }
+
+    private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResult(
+        string spName,
+        AtomicQueryResult atomic,
+        int displayTableCount,
+        int engineDatasetCount)
+    {
+        var list = new List<EnvelopeEvidenceItemV1>();
+
+        // 1) Prefer a "totalCount" metric from RS1 summary if present.
+        var totalCount = TryGetIntFromSummary(atomic.Summary?.Table, "totalCount");
+        if (totalCount is not null)
+        {
+            list.Add(new EnvelopeEvidenceItemV1
+            {
+                Id = "total_count",
+                Type = "metric",
+                Title = "Total count",
+                Payload = new
+                {
+                    spName,
+                    totalCount,
+                    filters = new
+                    {
+                        season = TryGetStringFromSummary(atomic.Summary?.Table, "seasonFilter"),
+                        collection = TryGetStringFromSummary(atomic.Summary?.Table, "collectionFilter"),
+                        rangeName = TryGetStringFromSummary(atomic.Summary?.Table, "rangeNameFilter")
+                    }
+                }
+            });
+        }
+
+        // 2) Always return a minimal execution snapshot.
+        list.Add(new EnvelopeEvidenceItemV1
+        {
+            Id = "execution",
+            Type = "metric",
+            Title = "Execution snapshot",
+            Payload = new
+            {
+                spName,
+                resultSets = new
+                {
+                    summary = atomic.Summary is not null,
+                    tables = atomic.Tables.Count,
+                    displayTables = displayTableCount,
+                    engineDatasets = engineDatasetCount
+                }
+            }
+        });
+
+        // 3) If summary is missing but we have at least one table, expose a small preview hint.
+        if (atomic.Summary is null && atomic.Tables.Count > 0)
+        {
+            var first = atomic.Tables[0];
+            list.Add(new EnvelopeEvidenceItemV1
+            {
+                Id = "preview_hint",
+                Type = "list",
+                Title = "Preview hint",
+                Payload = new
+                {
+                    tableName = first.Schema.TableName,
+                    columns = first.Table.Columns.Select(c => c.Name).Take(20),
+                    rowsReturned = first.Table.Rows.Count,
+                    note = "Summary RS1 was not present; use displayTables/engineDatasets in payload.data for details."
+                }
+            });
+        }
+
+        return list;
+    }
+
+    private static int? TryGetIntFromSummary(TabularData? summary, string columnName)
+    {
+        if (summary is null || summary.Rows.Count == 0)
+            return null;
+
+        var idx = FindColumnIndex(summary, columnName);
+        if (idx < 0)
+            return null;
+
+        var v = summary.Rows[0][idx];
+        if (v is null)
+            return null;
+
+        if (v is int i) return i;
+        if (v is long l) return (int)Math.Clamp(l, int.MinValue, int.MaxValue);
+        if (v is decimal d) return (int)d;
+        if (v is double db) return (int)db;
+
+        if (int.TryParse(v.ToString(), out var parsed))
+            return parsed;
+
+        return null;
+    }
+
+    private static string? TryGetStringFromSummary(TabularData? summary, string columnName)
+    {
+        if (summary is null || summary.Rows.Count == 0)
+            return null;
+
+        var idx = FindColumnIndex(summary, columnName);
+        if (idx < 0)
+            return null;
+
+        return summary.Rows[0][idx]?.ToString();
+    }
+
+    private static int FindColumnIndex(TabularData summary, string columnName)
+    {
+        for (var i = 0; i < summary.Columns.Count; i++)
+        {
+            if (string.Equals(summary.Columns[i].Name, columnName, StringComparison.OrdinalIgnoreCase))
+                return i;
+        }
+        return -1;
     }
 
     private static string NormalizeStoredProcedureName(string input)
@@ -242,9 +415,24 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         if (parameters is null || parameters.Count == 0)
             return (new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase), new List<string>());
 
-        // Fail-closed when allow-list is empty: drop all.
+        // If the catalog allow-list is empty/missing, do NOT drop everything.
+        // We keep the provided params and rely on DB metadata filtering at execution time (see AtomicQueryRepository).
         if (allowedParams is null || allowedParams.Count == 0)
-            return (new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase), parameters.Keys.ToList());
+        {
+            var normalized = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in parameters)
+            {
+                var name = kv.Key;
+                if (string.IsNullOrWhiteSpace(name))
+                    continue;
+
+                if (!name.StartsWith("@", StringComparison.Ordinal))
+                    name = "@" + name;
+
+                normalized[name] = kv.Value;
+            }
+            return (normalized, new List<string>());
+        }
 
         var filtered = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
         var dropped = new List<string>();
@@ -264,6 +452,45 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         }
 
         return (filtered, dropped);
+    }
+
+    /// <summary>
+    /// Normalizes common semantic parameters to ERP-friendly canonical forms.
+    /// Currently supports Season: "24/25" => "2024/2025".
+    ///
+    /// This runs after governance filtering and before execution.
+    /// It does not inject new params; it only normalizes existing ones.
+    /// </summary>
+    private static IReadOnlyDictionary<string, object?> NormalizeSeasonParams(IReadOnlyDictionary<string, object?> parameters)
+    {
+        if (parameters is null || parameters.Count == 0)
+            return parameters;
+
+        // Clone into a mutable dictionary.
+        var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in parameters)
+            dict[kv.Key] = kv.Value;
+
+        foreach (var key in dict.Keys.ToList())
+        {
+            var normalizedName = AtomicCatalogService.NormalizeParamName(key);
+            if (!string.Equals(normalizedName, "@Season", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var v = dict[key];
+            if (v is null)
+                continue;
+
+            var s = v.ToString();
+            if (string.IsNullOrWhiteSpace(s))
+                continue;
+
+            var normalizedSeason = SeasonNormalizer.NormalizeValue(s);
+            if (!string.Equals(normalizedSeason, s, StringComparison.Ordinal))
+                dict[key] = normalizedSeason;
+        }
+
+        return dict;
     }
 
     private static object? ConvertJsonValue(JsonElement v)
@@ -415,5 +642,5 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         return new TabularData(keep, rows, table.TotalCount);
     }
 
-    
+
 }

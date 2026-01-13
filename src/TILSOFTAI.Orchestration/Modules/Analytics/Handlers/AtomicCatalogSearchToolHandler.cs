@@ -1,5 +1,6 @@
 using TILSOFTAI.Application.Services;
 using TILSOFTAI.Domain.ValueObjects;
+using TILSOFTAI.Orchestration.Contracts;
 using TILSOFTAI.Orchestration.Tools;
 using TILSOFTAI.Orchestration.Tools.Modularity;
 
@@ -57,9 +58,36 @@ public sealed class AtomicCatalogSearchToolHandler : IToolHandler
                 topK,
                 results = items
             },
-            warnings = Array.Empty<string>()
+            warnings = items.Count() == 0
+                ? new[] { "No catalog hit. Verify dbo.TILSOFTAI_SPCatalog has data, or add the required stored procedure." }
+                : Array.Empty<string>()
         };
 
-        return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateSuccess("atomic.catalog.search executed", payload));
+        var evidence = new List<EnvelopeEvidenceItemV1>();
+
+        // Evidence: always return a compact list of hits so the client/LLM can respond without looping.
+        // Keep it small to avoid token bloat.
+        var compactHits = hits.Take(Math.Clamp(topK, 1, 10)).Select(h => new
+        {
+            spName = h.SpName,
+            // Avoid overload ambiguity: Score is int and can convert to both double/decimal.
+            score = Math.Round((double)h.Score, 4),
+            domain = h.Domain,
+            entity = h.Entity
+        });
+
+        evidence.Add(new EnvelopeEvidenceItemV1
+        {
+            Id = "catalog_hits",
+            Type = "list",
+            Title = "Catalog hits",
+            Payload = new { query, topK, results = compactHits }
+        });
+
+        var extras = new ToolDispatchExtras(
+            Source: new EnvelopeSourceV1 { System = "sqlserver", Name = "dbo.TILSOFTAI_SPCatalog", Cache = "na" },
+            Evidence: evidence);
+
+        return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateSuccess("atomic.catalog.search executed", payload), extras);
     }
 }
