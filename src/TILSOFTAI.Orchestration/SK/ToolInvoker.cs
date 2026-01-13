@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 using System.Security;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -16,6 +17,7 @@ namespace TILSOFTAI.Orchestration.SK;
 public sealed class ToolInvoker
 {
     private readonly ToolRegistry _registry;
+    private readonly ILogger<ToolInvoker> _logger;
     private readonly ToolDispatcher _dispatcher;
     private readonly RbacService _rbac;
     private readonly ExecutionContextAccessor _ctx;
@@ -31,7 +33,8 @@ public sealed class ToolInvoker
         ExecutionContextAccessor ctx,
         IConversationStateStore conversationState,
         IFilterPatchMerger filterPatchMerger,
-        IResponseSchemaValidator responseSchemaValidator)
+        IResponseSchemaValidator responseSchemaValidator,
+        ILogger<ToolInvoker> logger)
     {
         _registry = registry;
         _dispatcher = dispatcher;
@@ -40,6 +43,7 @@ public sealed class ToolInvoker
         _conversationState = conversationState;
         _filterPatchMerger = filterPatchMerger;
         _responseSchemaValidator = responseSchemaValidator;
+        _logger = logger;
     }
 
     public async Task<object> ExecuteAsync(string toolName, object argsObj, CancellationToken ct)
@@ -56,6 +60,14 @@ public sealed class ToolInvoker
         args = await MergeConversationFiltersIfNeededAsync(toolName, args, ct);
 
         var sw = Stopwatch.StartNew();
+
+        var argKeys = args.ValueKind == JsonValueKind.Object
+            ? string.Join(",", args.EnumerateObject().Select(p => p.Name))
+            : args.ValueKind.ToString();
+
+        _logger.LogInformation("ToolInvoker start req={RequestId} trace={TraceId} tool={Tool} argKeys={ArgKeys}",
+            _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, argKeys);
+
         var requiresWrite = false;
         object? normalizedIntent = null;
 
@@ -70,6 +82,7 @@ public sealed class ToolInvoker
             if (!_registry.IsWhitelisted(toolName))
             {
                 policy = EnvelopePolicyV1.Deny(_ctx.Context, "TOOL_NOT_ALLOWED");
+                _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code=TOOL_NOT_ALLOWED ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
                 return EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
                     telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                     policy: policy,
@@ -80,6 +93,7 @@ public sealed class ToolInvoker
             if (!_registry.TryValidate(toolName, args, out var intent, out var validationError, out requiresWrite))
             {
                 policy = EnvelopePolicyV1.Deny(_ctx.Context, "VALIDATION_ERROR");
+                _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code=VALIDATION_ERROR ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
                 return EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
                     telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                     policy: policy,
@@ -99,6 +113,7 @@ public sealed class ToolInvoker
             catch (SecurityException)
             {
                 policy = EnvelopePolicyV1.Deny(_ctx.Context, "FORBIDDEN");
+                _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code=FORBIDDEN ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
                 return EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
                     telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                     policy: policy,
@@ -114,6 +129,7 @@ public sealed class ToolInvoker
             if (!dispatchResult.Result.Success)
             {
                 policy = EnvelopePolicyV1.Deny(_ctx.Context, "TOOL_EXECUTION_FAILED");
+                _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code=TOOL_EXECUTION_FAILED ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
                 return EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
                     telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                     policy: policy,
@@ -138,6 +154,7 @@ public sealed class ToolInvoker
             if (evidence is null || evidence.Count == 0)
                 evidence = EvidenceFallbackBuilder.Build(lastPayload);
 
+            _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=true ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
             return EnvelopeV1.Success(toolName, requiresWrite, _ctx.Context,
                 telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                 policy: policy,
@@ -154,6 +171,7 @@ public sealed class ToolInvoker
             // Returning a structured failure envelope prevents the LLM from repeatedly calling the same tool
             // while also keeping the API stable (no hard throw).
             policy = EnvelopePolicyV1.Deny(_ctx.Context, "CONTRACT_ERROR");
+                _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code=CONTRACT_ERROR ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
             return EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
                 telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                 policy: policy,
@@ -173,6 +191,7 @@ public sealed class ToolInvoker
         catch (Exception ex)
         {
             policy = EnvelopePolicyV1.Deny(_ctx.Context, "INTERNAL_ERROR");
+                _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code=INTERNAL_ERROR ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
             return EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
                 telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                 policy: policy,

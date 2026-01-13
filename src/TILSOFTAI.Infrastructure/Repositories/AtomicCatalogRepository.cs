@@ -1,5 +1,7 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using System.Linq;
 using System.Data;
 using TILSOFTAI.Domain.Interfaces;
@@ -14,10 +16,12 @@ namespace TILSOFTAI.Infrastructure.Repositories;
 public sealed class AtomicCatalogRepository : IAtomicCatalogRepository
 {
     private readonly SqlServerDbContext _dbContext;
+    private readonly ILogger<AtomicCatalogRepository> _logger;
 
-    public AtomicCatalogRepository(SqlServerDbContext dbContext)
+    public AtomicCatalogRepository(SqlServerDbContext dbContext, ILogger<AtomicCatalogRepository>? logger = null)
     {
         _dbContext = dbContext;
+        _logger = logger ?? NullLogger<AtomicCatalogRepository>.Instance;
     }
 
 
@@ -35,6 +39,7 @@ public sealed class AtomicCatalogRepository : IAtomicCatalogRepository
 
         var variants = BuildQueryVariants(query);
         var tokens = Tokenize(variants).Take(12).ToArray();
+        _logger.LogInformation("AtomicCatalogRepository.Search start query={Query} topK={TopK} variants={Variants} tokens={Tokens}", query, topK, variants.Count, string.Join("|", tokens));
 
         // 1) Lightweight pre-filter in SQL (avoid scanning the whole catalog).
         // We only reference columns that are known to exist (see GetByNameAsync).
@@ -103,10 +108,14 @@ public sealed class AtomicCatalogRepository : IAtomicCatalogRepository
             }
         }
 
+        _logger.LogInformation("AtomicCatalogRepository.Search candidates={Candidates}", candidates.Count);
+
         // 2) If catalog is empty or no candidates found, fall back to sys.procedures for "did you mean".
         // This does NOT bypass governance; it only prevents "empty result" loops.
         if (candidates.Count == 0)
         {
+            _logger.LogWarning("AtomicCatalogRepository.Search no catalog candidates; falling back to sys.procedures tokens={Tokens}", string.Join("|", tokens));
+
             // 2.1) Try token-based lookup first
             var sysHits = await SearchSysProceduresAsync(conn, tokens, topK: Math.Max(topK, 5), cancellationToken);
 
@@ -137,6 +146,13 @@ public sealed class AtomicCatalogRepository : IAtomicCatalogRepository
             .Take(topK)
             .ToList();
 
+        if (scored.Count > 0)
+        {
+            var top = string.Join(", ", scored.Take(Math.Min(scored.Count, 5)).Select(h => $"{h.SpName}:{h.Score}"));
+            _logger.LogInformation("AtomicCatalogRepository.Search scored hits={Hits} top={Top}", scored.Count, top);
+        }
+
+
         // 4) Final fallback: never return empty if the catalog has data.
         if (scored.Count == 0)
         {
@@ -154,6 +170,13 @@ public sealed class AtomicCatalogRepository : IAtomicCatalogRepository
                     ParamsJson: x.entry.ParamsJson,
                     ExampleJson: x.entry.ExampleJson))
                 .ToList();
+
+        if (scored.Count > 0)
+        {
+            var top = string.Join(", ", scored.Take(Math.Min(scored.Count, 5)).Select(h => $"{h.SpName}:{h.Score}"));
+            _logger.LogInformation("AtomicCatalogRepository.Search scored hits={Hits} top={Top}", scored.Count, top);
+        }
+
         }
 
         return scored;

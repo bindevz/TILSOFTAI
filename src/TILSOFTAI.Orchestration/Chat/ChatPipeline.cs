@@ -1,4 +1,6 @@
 ﻿using Microsoft.SemanticKernel;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Connectors.OpenAI;
 using Microsoft.Extensions.DependencyInjection;
@@ -34,6 +36,7 @@ public sealed class ChatPipeline
     private readonly IChatTextLocalizer _localizer;
     private readonly ChatTextPatterns _patterns;
     private readonly ChatTuningOptions _tuning;
+    private readonly ILogger<ChatPipeline> _logger;
     private readonly JsonSerializerOptions _serializerOptions = new(JsonSerializerDefaults.Web);
 
     private readonly IServiceProvider _serviceProvider;
@@ -62,7 +65,8 @@ public sealed class ChatPipeline
         ILanguageResolver languageResolver,
         IChatTextLocalizer localizer,
         ChatTextPatterns patterns,
-        ChatTuningOptions tuning)
+        ChatTuningOptions tuning,
+        ILogger<ChatPipeline>? logger = null)
     {
         _kernelFactory = kernelFactory;
         _ctxAccessor = ctxAccessor;
@@ -83,6 +87,7 @@ public sealed class ChatPipeline
         _pluginCatalog = pluginCatalog;
         _moduleRouter = moduleRouter;
         _exposurePolicies = exposurePolicies;
+        _logger = logger ?? NullLogger<ChatPipeline>.Instance;
     }
 
     public async Task<ChatCompletionResponse> HandleAsync(ChatCompletionRequest request, TSExecutionContext context, CancellationToken cancellationToken)
@@ -140,6 +145,9 @@ public sealed class ChatPipeline
         _ctxAccessor.ConfirmedConfirmationId = _patterns.TryExtractConfirmationId(lastUserMessage);
         _ctxAccessor.AutoInvokeCount = 0;
         _ctxAccessor.AutoInvokeSignatureCounts.Clear();
+
+        _logger.LogInformation("ChatPipeline start requestId={RequestId} traceId={TraceId} convId={ConversationId} userId={UserId} lang={Lang} model={Model} msgs={MsgCount}",
+            context.RequestId, context.TraceId, context.ConversationId, context.UserId, lang.ToIsoCode(), request.Model, incomingMessages.Count);
 
         // 2) build kernel
         var kernel = _kernelFactory.CreateKernel(request.Model);
@@ -248,18 +256,31 @@ public sealed class ChatPipeline
                 content = await GetAssistantAnswerAsync(request.Model, kernel, history, lang, cancellationToken);
             }
 
-            // Defensive: if some path returns empty content, force a no-tools synthesis pass
+            // Defensive: if some path returns empty content, force a no-tools synthesis pass.
             if (string.IsNullOrWhiteSpace(content))
             {
+                _logger.LogWarning("ChatPipeline got empty content after tool/loop path; forcing no-tools synthesis. autoInvokes={AutoInvokes}", _ctxAccessor.AutoInvokeCount);
                 content = await SynthesizeWithoutToolsAsync(request.Model, history, lang, cancellationToken);
             }
 
             // thấy marker / flag thì xóa content để ép synthesis
+            _logger.LogWarning("ChatPipeline circuit breaker check tripped={Tripped} reason={Reason} autoInvokes={AutoInvokes} signatures={SigCount} contentPreview={Preview}",
+                    _ctxAccessor.CircuitBreakerTripped, _ctxAccessor.CircuitBreakerReason, _ctxAccessor.AutoInvokeCount, _ctxAccessor.AutoInvokeSignatureCounts.Count,
+                    content.Length > 200 ? content.Substring(0, 200) : content);
+
             if (_ctxAccessor.CircuitBreakerTripped ||
                 content.StartsWith("CIRCUIT_BREAKER", StringComparison.OrdinalIgnoreCase) ||
                 content.Contains("\"circuit_breaker\"", StringComparison.OrdinalIgnoreCase))
             {
-                content = string.Empty;
+                // Circuit breaker triggered: do NOT call the LLM again. Build a deterministic fallback
+                // using the last known tool evidence captured during this request.
+                content = BuildCircuitBreakerFallback(lang);
+            }
+
+            // Absolute safety: never return empty assistant content to the client.
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                content = _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
             }
         }
         catch (ToolContractViolationException ex)
@@ -273,6 +294,8 @@ public sealed class ChatPipeline
         }
 
         await _auditLogger.LogUserInputAsync(context, serializedRequest, cancellationToken);
+
+        _logger.LogInformation("ChatPipeline end breakerTripped={Tripped} autoInvokes={AutoInvokes} finalContentLen={Len}", _ctxAccessor.CircuitBreakerTripped, _ctxAccessor.AutoInvokeCount, content?.Length ?? 0);
 
         var response = BuildResponse(request.Model ?? "TILSOFT-AI", content, incomingMessages);
         _tokenBudget.EnsureWithinBudget(response.Choices.First().Message.Content);
@@ -326,6 +349,54 @@ public sealed class ChatPipeline
         if (string.IsNullOrWhiteSpace(final))
             final = _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
         return final;
+    }
+
+    private string BuildCircuitBreakerFallback(ChatLanguage lang)
+    {
+        // Prefer deterministic metrics captured from the last successful atomic.query.execute.
+        if (_ctxAccessor.LastTotalCount is not null)
+        {
+            var sp = _ctxAccessor.LastStoredProcedure ?? "(unknown)";
+            var season = _ctxAccessor.LastSeasonFilter;
+            var collection = _ctxAccessor.LastCollectionFilter;
+            var range = _ctxAccessor.LastRangeNameFilter;
+
+            if (lang == ChatLanguage.En)
+            {
+                var filterText = BuildFilterTextEn(season, collection, range);
+                return $"Total models: {_ctxAccessor.LastTotalCount}." +
+                       (string.IsNullOrWhiteSpace(filterText) ? string.Empty : $" Filters: {filterText}.") +
+                       $" (source: {sp})";
+            }
+            else
+            {
+                var filterText = BuildFilterTextVi(season, collection, range);
+                return $"Tổng số model: {_ctxAccessor.LastTotalCount}." +
+                       (string.IsNullOrWhiteSpace(filterText) ? string.Empty : $" Bộ lọc: {filterText}.") +
+                       $" (nguồn: {sp})";
+            }
+        }
+
+        // As a safe last resort, return a non-empty localized message.
+        return _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
+    }
+
+    private static string BuildFilterTextEn(string? season, string? collection, string? range)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(season)) parts.Add($"season={season}");
+        if (!string.IsNullOrWhiteSpace(collection)) parts.Add($"collection={collection}");
+        if (!string.IsNullOrWhiteSpace(range)) parts.Add($"range={range}");
+        return string.Join(", ", parts);
+    }
+
+    private static string BuildFilterTextVi(string? season, string? collection, string? range)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(season)) parts.Add($"mùa={season}");
+        if (!string.IsNullOrWhiteSpace(collection)) parts.Add($"bộ sưu tập={collection}");
+        if (!string.IsNullOrWhiteSpace(range)) parts.Add($"range={range}");
+        return string.Join(", ", parts);
     }
 
     private async Task<string> SynthesizeWithoutToolsAsync(

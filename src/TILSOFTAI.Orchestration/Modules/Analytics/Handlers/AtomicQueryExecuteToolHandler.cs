@@ -1,7 +1,9 @@
+using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using TILSOFTAI.Application.Services;
 using TILSOFTAI.Domain.Utilities;
 using TILSOFTAI.Domain.ValueObjects;
+using TILSOFTAI.Orchestration.SK;
 using TILSOFTAI.Orchestration.Contracts;
 using TILSOFTAI.Orchestration.Tools;
 using TILSOFTAI.Orchestration.Tools.Modularity;
@@ -26,15 +28,21 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
     private readonly AtomicQueryService _atomicQueryService;
     private readonly AnalyticsService _analyticsService;
     private readonly AtomicCatalogService _catalog;
+    private readonly ExecutionContextAccessor _ctxAccessor;
+    private readonly ILogger<AtomicQueryExecuteToolHandler> _logger;
 
     public AtomicQueryExecuteToolHandler(
         AtomicQueryService atomicQueryService,
         AnalyticsService analyticsService,
-        AtomicCatalogService catalog)
+        AtomicCatalogService catalog,
+        ExecutionContextAccessor ctxAccessor,
+        ILogger<AtomicQueryExecuteToolHandler> logger)
     {
         _atomicQueryService = atomicQueryService;
         _analyticsService = analyticsService;
         _catalog = catalog;
+        _ctxAccessor = ctxAccessor;
+        _logger = logger;
     }
 
     public async Task<ToolDispatchResult> HandleAsync(object intent, TSExecutionContext context, CancellationToken cancellationToken)
@@ -42,6 +50,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         var dyn = (DynamicToolIntent)intent;
 
         var spName = NormalizeStoredProcedureName(dyn.GetStringRequired("spName"));
+        _logger.LogInformation("AtomicQueryExecute start sp={Sp} req={RequestId} trace={TraceId}", spName, context.RequestId, context.TraceId);
 
         // Governance: allow only stored procedures registered in catalog.
         // Fail-closed: if not present/enabled/readonly/atomicCompatible => reject.
@@ -112,9 +121,23 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
         // Normalize semantic parameters (e.g., Season) to improve compatibility with ERP conventions.
         // This runs after governance filtering and before executing the stored procedure.
-        filteredParams = NormalizeSeasonParams(filteredParams);
+        // Additionally, if normalization likely caused an empty result (common when DB stores short seasons like "24/25"),
+        // we perform a single, bounded retry using the original value.
+        var seasonNorm = NormalizeSeasonParamsWithInfo(filteredParams, out var normalizedParams);
 
-        var atomic = await _atomicQueryService.ExecuteAsync(spName, filteredParams, readOptions, cancellationToken);
+        var atomic = await _atomicQueryService.ExecuteAsync(spName, normalizedParams, readOptions, cancellationToken);
+
+        if (seasonNorm.Changed && IsLikelyEmptyResult(atomic))
+        {
+            _logger.LogWarning(
+                "AtomicQueryExecute season normalization yielded empty result; retrying once with original season. sp={Sp} original={Orig} normalized={Norm}",
+                spName,
+                seasonNorm.Original,
+                seasonNorm.Normalized);
+
+            var retryParams = ReplaceSeasonValue(normalizedParams, seasonNorm.Original!);
+            atomic = await _atomicQueryService.ExecuteAsync(spName, retryParams, readOptions, cancellationToken);
+        }
 
         // Summary (RS1) is always safe to display (bounded by MaxRowsSummary).
         var summaryPayload = atomic.Summary is null ? null : new
@@ -241,11 +264,35 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         // Evidence: provide a compact, stable slice so the client can always render an answer.
         var evidence = BuildEvidenceFromAtomicResult(spName, atomic, displayTables.Count, engineDatasets.Count);
 
+        // Cache key answer hints for deterministic fallback when circuit breaker trips.
+        CacheAnswerHints(spName, atomic);
+
+        _logger.LogInformation(
+            "AtomicQueryExecute done sp={Sp} totalCount={TotalCount} displayTables={DisplayTables} engineDatasets={EngineDatasets} tables={Tables}",
+            spName,
+            _ctxAccessor.LastTotalCount,
+            displayTables.Count,
+            engineDatasets.Count,
+            atomic.Tables.Count);
+
         var extras = new ToolDispatchExtras(
             Source: new EnvelopeSourceV1 { System = "sqlserver", Name = spName, Cache = "na" },
             Evidence: evidence);
 
         return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateSuccess("atomic.query.execute executed", payload), extras);
+    }
+
+    private void CacheAnswerHints(string spName, AtomicQueryResult atomic)
+    {
+        var totalCount = TryGetIntFromSummary(atomic.Summary?.Table, "totalCount");
+        if (totalCount is null)
+            return;
+
+        _ctxAccessor.LastTotalCount = totalCount;
+        _ctxAccessor.LastStoredProcedure = spName;
+        _ctxAccessor.LastSeasonFilter = TryGetStringFromSummary(atomic.Summary?.Table, "seasonFilter");
+        _ctxAccessor.LastCollectionFilter = TryGetStringFromSummary(atomic.Summary?.Table, "collectionFilter");
+        _ctxAccessor.LastRangeNameFilter = TryGetStringFromSummary(atomic.Summary?.Table, "rangeNameFilter");
     }
 
     private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResult(
@@ -461,15 +508,24 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
     /// This runs after governance filtering and before execution.
     /// It does not inject new params; it only normalizes existing ones.
     /// </summary>
-    private static IReadOnlyDictionary<string, object?> NormalizeSeasonParams(IReadOnlyDictionary<string, object?> parameters)
+    private sealed record SeasonNormalizationInfo(bool Changed, string? Original, string? Normalized);
+
+    private static SeasonNormalizationInfo NormalizeSeasonParamsWithInfo(
+        IReadOnlyDictionary<string, object?> parameters,
+        out IReadOnlyDictionary<string, object?> normalized)
     {
+        normalized = parameters;
+
         if (parameters is null || parameters.Count == 0)
-            return parameters;
+            return new SeasonNormalizationInfo(false, null, null);
 
         // Clone into a mutable dictionary.
         var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
         foreach (var kv in parameters)
             dict[kv.Key] = kv.Value;
+
+        string? original = null;
+        string? norm = null;
 
         foreach (var key in dict.Keys.ToList())
         {
@@ -487,10 +543,52 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
             var normalizedSeason = SeasonNormalizer.NormalizeValue(s);
             if (!string.Equals(normalizedSeason, s, StringComparison.Ordinal))
+            {
+                original = s;
+                norm = normalizedSeason;
                 dict[key] = normalizedSeason;
+            }
+        }
+
+        normalized = dict;
+        return new SeasonNormalizationInfo(original is not null, original, norm);
+    }
+
+    private static IReadOnlyDictionary<string, object?> ReplaceSeasonValue(
+        IReadOnlyDictionary<string, object?> parameters,
+        string seasonValue)
+    {
+        var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in parameters)
+            dict[kv.Key] = kv.Value;
+
+        foreach (var key in dict.Keys.ToList())
+        {
+            var normalizedName = AtomicCatalogService.NormalizeParamName(key);
+            if (string.Equals(normalizedName, "@Season", StringComparison.OrdinalIgnoreCase))
+            {
+                dict[key] = seasonValue;
+            }
         }
 
         return dict;
+    }
+
+    private static bool IsLikelyEmptyResult(AtomicQueryResult atomic)
+    {
+        // Heuristic: if totalCount exists and is > 0, it is not empty.
+        var totalCount = TryGetIntFromSummary(atomic.Summary?.Table, "totalCount");
+        if (totalCount is not null && totalCount > 0)
+            return false;
+
+        // If any display table contains rows, it is not empty.
+        foreach (var t in atomic.Tables)
+        {
+            if (t?.Table?.Rows is not null && t.Table.Rows.Count > 0)
+                return false;
+        }
+
+        return true;
     }
 
     private static object? ConvertJsonValue(JsonElement v)

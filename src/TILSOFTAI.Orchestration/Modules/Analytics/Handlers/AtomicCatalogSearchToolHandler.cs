@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using TILSOFTAI.Application.Services;
 using TILSOFTAI.Domain.ValueObjects;
 using TILSOFTAI.Orchestration.Contracts;
@@ -11,10 +12,12 @@ public sealed class AtomicCatalogSearchToolHandler : IToolHandler
     public string ToolName => "atomic.catalog.search";
 
     private readonly AtomicCatalogService _catalog;
+    private readonly ILogger<AtomicCatalogSearchToolHandler> _logger;
 
-    public AtomicCatalogSearchToolHandler(AtomicCatalogService catalog)
+    public AtomicCatalogSearchToolHandler(AtomicCatalogService catalog, ILogger<AtomicCatalogSearchToolHandler> logger)
     {
         _catalog = catalog;
+        _logger = logger;
     }
 
     public async Task<ToolDispatchResult> HandleAsync(object intent, TSExecutionContext context, CancellationToken cancellationToken)
@@ -24,7 +27,9 @@ public sealed class AtomicCatalogSearchToolHandler : IToolHandler
         var query = dyn.GetStringRequired("query");
         var topK = dyn.GetInt("topK", 5);
 
+        _logger.LogInformation("AtomicCatalogSearch start q={Query} topK={TopK}", query, topK);
         var hits = await _catalog.SearchAsync(query, topK, cancellationToken);
+        _logger.LogInformation("AtomicCatalogSearch end q={Query} hits={Hits} top1={Top1}", query, hits.Count, hits.FirstOrDefault()?.SpName);
 
         var items = hits.Select(h => new
         {

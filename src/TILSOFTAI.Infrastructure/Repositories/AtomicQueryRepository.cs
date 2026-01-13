@@ -1,5 +1,8 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+
 using System.Data;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Domain.ValueObjects;
@@ -15,58 +18,61 @@ namespace TILSOFTAI.Infrastructure.Repositories;
 public sealed class AtomicQueryRepository : IAtomicQueryRepository
 {
 
-        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTimeOffset fetchedAtUtc, HashSet<string> names)> _paramNameCache
-            = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTimeOffset fetchedAtUtc, HashSet<string> names)> _paramNameCache
+        = new(StringComparer.OrdinalIgnoreCase);
 
-        private static async Task<HashSet<string>?> TryGetStoredProcedureParamNamesAsync(
-            SqlConnection conn,
-            string storedProcedure,
-            CancellationToken cancellationToken)
+    private static async Task<HashSet<string>?> TryGetStoredProcedureParamNamesAsync(
+        SqlConnection conn,
+        string storedProcedure,
+        CancellationToken cancellationToken)
+    {
+        // Cache per database + procedure to avoid repeated sys lookups.
+        var key = $"{conn.DataSource}|{conn.Database}|{storedProcedure}".ToLowerInvariant();
+
+        if (_paramNameCache.TryGetValue(key, out var cached) &&
+            (DateTimeOffset.UtcNow - cached.fetchedAtUtc) < TimeSpan.FromMinutes(10))
         {
-            // Cache per database + procedure to avoid repeated sys lookups.
-            var key = $"{conn.DataSource}|{conn.Database}|{storedProcedure}".ToLowerInvariant();
-
-            if (_paramNameCache.TryGetValue(key, out var cached) &&
-                (DateTimeOffset.UtcNow - cached.fetchedAtUtc) < TimeSpan.FromMinutes(10))
-            {
-                return cached.names;
-            }
-
-            await using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
-SELECT p.name
-FROM sys.parameters p
-WHERE p.object_id = OBJECT_ID(@spName)
-  AND p.is_output = 0
-  AND p.name <> '@RETURN_VALUE';";
-            cmd.CommandType = CommandType.Text;
-            cmd.CommandTimeout = 10;
-            cmd.Parameters.Add(new SqlParameter("@spName", SqlDbType.NVarChar, 256) { Value = storedProcedure });
-
-            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                if (!reader.IsDBNull(0))
-                {
-                    var name = reader.GetString(0);
-                    if (!string.IsNullOrWhiteSpace(name))
-                        set.Add(name.Trim());
-                }
-            }
-
-            if (set.Count == 0)
-                return null;
-
-            _paramNameCache[key] = (DateTimeOffset.UtcNow, set);
-            return set;
+            return cached.names;
         }
 
-    private readonly SqlServerDbContext _dbContext;
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT p.name
+            FROM sys.parameters p
+            WHERE p.object_id = OBJECT_ID(@spName)
+              AND p.is_output = 0
+              AND p.name <> '@RETURN_VALUE';";
+        cmd.CommandType = CommandType.Text;
+        cmd.CommandTimeout = 10;
+        cmd.Parameters.Add(new SqlParameter("@spName", SqlDbType.NVarChar, 256) { Value = storedProcedure });
 
-    public AtomicQueryRepository(SqlServerDbContext dbContext)
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(0))
+            {
+                var name = reader.GetString(0);
+                if (!string.IsNullOrWhiteSpace(name))
+                    set.Add(name.Trim());
+            }
+        }
+
+        if (set.Count == 0)
+            return null;
+
+        _paramNameCache[key] = (DateTimeOffset.UtcNow, set);
+        return set;
+    }
+
+    private readonly SqlServerDbContext _dbContext;
+    private readonly ILogger<AtomicQueryRepository> _logger;
+
+    public AtomicQueryRepository(SqlServerDbContext dbContext, ILogger<AtomicQueryRepository>? logger = null)
     {
         _dbContext = dbContext;
+        _logger = logger ?? NullLogger<AtomicQueryRepository>.Instance;
     }
 
     public async Task<AtomicQueryResult> ExecuteAsync(
@@ -84,13 +90,20 @@ WHERE p.object_id = OBJECT_ID(@spName)
         cmd.CommandType = CommandType.StoredProcedure;
         cmd.CommandTimeout = 60;
 
+        _logger.LogInformation("AtomicQueryRepository.Execute start sp={Sp} paramCount={ParamCount}", storedProcedure, parameters?.Count ?? 0);
+
+        var droppedParams = new List<string>();
+
+
         HashSet<string>? actualParamNames = null;
         try
         {
             actualParamNames = await TryGetStoredProcedureParamNamesAsync(conn, storedProcedure, cancellationToken);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger.LogDebug(ex, "AtomicQueryRepository.Execute metadata lookup failed sp={Sp}; will accept provided params", storedProcedure);
+
             // Best-effort only. If sys metadata is unavailable (permissions), we fall back to trusting input.
         }
 
@@ -108,6 +121,7 @@ WHERE p.object_id = OBJECT_ID(@spName)
                 if (actualParamNames is not null && actualParamNames.Count > 0 && !actualParamNames.Contains(name))
                 {
                     // Unknown parameter for this stored procedure; ignore to avoid SQL errors.
+                    droppedParams.Add(name);
                     continue;
                 }
 
@@ -117,7 +131,19 @@ WHERE p.object_id = OBJECT_ID(@spName)
             }
         }
 
+        _logger.LogInformation("AtomicQueryRepository.Execute prepared sp={Sp} actualParamCount={ActualParamCount} providedParamCount={ProvidedParamCount} droppedParamCount={DroppedParamCount}",
+            storedProcedure,
+            actualParamNames?.Count ?? -1,
+            parameters?.Count ?? 0,
+            droppedParams.Count);
+        if (droppedParams.Count > 0)
+        {
+            _logger.LogDebug("AtomicQueryRepository.Execute dropped params sp={Sp} dropped={Dropped}", storedProcedure, string.Join(",", droppedParams.Take(20)));
+            _logger.LogWarning("AtomicQueryRepository.Execute dropped unknown params sp={Sp} dropped={Dropped}", storedProcedure, string.Join(",", droppedParams.Distinct(StringComparer.OrdinalIgnoreCase)));
+        }
+
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
 
         // Enforce hard bounds while materializing.
         var options = new SqlAtomicQueryReader.ReadOptions(
@@ -126,6 +152,9 @@ WHERE p.object_id = OBJECT_ID(@spName)
             MaxSchemaRows: Math.Clamp(readOptions.MaxSchemaRows, 1, 500_000));
 
         var atomic = await SqlAtomicQueryReader.ReadAsync(reader, options, cancellationToken);
+
+        _logger.LogInformation("AtomicQueryRepository.Execute read done sp={Sp} hasSummary={HasSummary} tables={Tables}", storedProcedure, atomic.Summary is not null, atomic.Tables.Count);
+
 
         // Optional: clamp number of tables (fail-closed).
         if (readOptions.MaxTables > 0 && atomic.Tables.Count > readOptions.MaxTables)
