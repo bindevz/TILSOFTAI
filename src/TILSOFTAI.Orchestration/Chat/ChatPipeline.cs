@@ -145,6 +145,12 @@ public sealed class ChatPipeline
         _ctxAccessor.ConfirmedConfirmationId = _patterns.TryExtractConfirmationId(lastUserMessage);
         _ctxAccessor.AutoInvokeCount = 0;
         _ctxAccessor.AutoInvokeSignatureCounts.Clear();
+        _ctxAccessor.LastTotalCount = null;
+        _ctxAccessor.LastStoredProcedure = null;
+        _ctxAccessor.LastSeasonFilter = null;
+        _ctxAccessor.LastCollectionFilter = null;
+        _ctxAccessor.LastRangeNameFilter = null;
+        _ctxAccessor.LastDisplayPreviewJson = null;
 
         _logger.LogInformation("ChatPipeline start requestId={RequestId} traceId={TraceId} convId={ConversationId} userId={UserId} lang={Lang} model={Model} msgs={MsgCount}",
             context.RequestId, context.TraceId, context.ConversationId, context.UserId, lang.ToIsoCode(), request.Model, incomingMessages.Count);
@@ -360,20 +366,33 @@ public sealed class ChatPipeline
             var season = _ctxAccessor.LastSeasonFilter;
             var collection = _ctxAccessor.LastCollectionFilter;
             var range = _ctxAccessor.LastRangeNameFilter;
+            var preview = _ctxAccessor.LastDisplayPreviewJson;
 
             if (lang == ChatLanguage.En)
             {
                 var filterText = BuildFilterTextEn(season, collection, range);
-                return $"Total models: {_ctxAccessor.LastTotalCount}." +
-                       (string.IsNullOrWhiteSpace(filterText) ? string.Empty : $" Filters: {filterText}.") +
-                       $" (source: {sp})";
+                var baseText =
+                    $"Total models: {_ctxAccessor.LastTotalCount}." +
+                    (string.IsNullOrWhiteSpace(filterText) ? string.Empty : $" Filters: {filterText}.") +
+                    $" (source: {sp})";
+
+                if (!string.IsNullOrWhiteSpace(preview))
+                    baseText += "\n\nPreview:\n" + preview;
+
+                return baseText;
             }
             else
             {
                 var filterText = BuildFilterTextVi(season, collection, range);
-                return $"Tổng số model: {_ctxAccessor.LastTotalCount}." +
-                       (string.IsNullOrWhiteSpace(filterText) ? string.Empty : $" Bộ lọc: {filterText}.") +
-                       $" (nguồn: {sp})";
+                var baseText =
+                    $"Tổng số model: {_ctxAccessor.LastTotalCount}." +
+                    (string.IsNullOrWhiteSpace(filterText) ? string.Empty : $" Bộ lọc: {filterText}.") +
+                    $" (nguồn: {sp})";
+
+                if (!string.IsNullOrWhiteSpace(preview))
+                    baseText += "\n\nPreview:\n" + preview;
+
+                return baseText;
             }
         }
 

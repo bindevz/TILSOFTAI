@@ -13,6 +13,7 @@ public sealed class ExecutionContextAccessor
     public string? LastSeasonFilter { get; set; }
     public string? LastCollectionFilter { get; set; }
     public string? LastRangeNameFilter { get; set; }
+    public string? LastDisplayPreviewJson { get; set; } // compact preview JSON for circuit-breaker fallback
 
     // Per-request circuit breaker state for auto tool invocation
     public int AutoInvokeCount { get; set; }

@@ -25,6 +25,16 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 {
     public string ToolName => "atomic.query.execute";
 
+    // Reserved "system" parameters for AtomicQuery paging/dataset mode.
+    // These must never be dropped by catalog allow-lists; otherwise dataset mode (@Page=0)
+    // will silently degrade into list mode and can trigger tool-call loops.
+    private static readonly HashSet<string> ReservedAtomicParams = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "@Page",
+        "@Size"
+    };
+
+
     private readonly AtomicQueryService _atomicQueryService;
     private readonly AnalyticsService _analyticsService;
     private readonly AtomicCatalogService _catalog;
@@ -197,36 +207,45 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
             if (decision.Engine)
             {
-                // Create short-lived dataset from table for AtomicDataEngine.
-                var bounds = new AnalyticsService.DatasetBounds(
-                    MaxRows: Math.Min(trimmedTable.Rows.Count, readOptions.MaxRowsPerTable),
-                    MaxColumns: maxColumns,
-                    PreviewRows: previewRows);
-
-                var dataset = await _analyticsService.CreateDatasetFromTabularAsync(
-                    source: "atomic",
-                    tabular: trimmedTable,
-                    bounds: bounds,
-                    context: context,
-                    cancellationToken: cancellationToken);
-
-                engineDatasets.Add(new
+                // Do NOT create an engine dataset from an empty table.
+                // This often occurs when a stored procedure returns a schema-only RS (e.g., list mode) and can mislead the LLM into retry loops.
+                if (trimmedTable.Rows.Count == 0)
                 {
-                    index = t.Schema.Index,
-                    tableName = t.Schema.TableName,
-                    tableKind = t.Schema.TableKind,
-                    delivery = t.Schema.Delivery ?? "auto",
-                    routingReason = decision.Reason,
-                    datasetId = dataset.DatasetId,
-                    expiresAtUtc = dataset.ExpiresAtUtc,
-                    semanticSchema = t.Schema,
-                    dataSchema = dataset.Schema,
-                    preview = new
+                    warnings.Add($"Engine table '{t.Schema.TableName}' returned 0 rows; dataset was not created. If you intended dataset mode, pass @Page=0 (and ensure @Page/@Size are not dropped by catalog allow-lists).");
+                }
+                else
+                {
+                    // Create short-lived dataset from table for AtomicDataEngine.
+                    var bounds = new AnalyticsService.DatasetBounds(
+                        MaxRows: Math.Min(trimmedTable.Rows.Count, readOptions.MaxRowsPerTable),
+                        MaxColumns: maxColumns,
+                        PreviewRows: previewRows);
+
+                    var dataset = await _analyticsService.CreateDatasetFromTabularAsync(
+                        source: "atomic",
+                        tabular: trimmedTable,
+                        bounds: bounds,
+                        context: context,
+                        cancellationToken: cancellationToken);
+
+                    engineDatasets.Add(new
                     {
-                        columns = dataset.Schema.Select(c => c.Name),
-                        rows = dataset.Preview
-                    }
-                });
+                        index = t.Schema.Index,
+                        tableName = t.Schema.TableName,
+                        tableKind = t.Schema.TableKind,
+                        delivery = t.Schema.Delivery ?? "auto",
+                        routingReason = decision.Reason,
+                        datasetId = dataset.DatasetId,
+                        expiresAtUtc = dataset.ExpiresAtUtc,
+                        semanticSchema = t.Schema,
+                        dataSchema = dataset.Schema,
+                        preview = new
+                        {
+                            columns = dataset.Schema.Select(c => c.Name),
+                            rows = dataset.Preview
+                        }
+                    });
+                }
             }
         }
 
@@ -293,9 +312,74 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         _ctxAccessor.LastSeasonFilter = TryGetStringFromSummary(atomic.Summary?.Table, "seasonFilter");
         _ctxAccessor.LastCollectionFilter = TryGetStringFromSummary(atomic.Summary?.Table, "collectionFilter");
         _ctxAccessor.LastRangeNameFilter = TryGetStringFromSummary(atomic.Summary?.Table, "rangeNameFilter");
+        _ctxAccessor.LastDisplayPreviewJson = TryBuildDisplayPreviewJson(atomic, maxRows: 12, maxCols: 12);
     }
 
-    private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResult(
+    
+    private static object? TryBuildDisplayPreviewPayload(AtomicQueryResult atomic, int maxRows, int maxCols)
+    {
+        maxRows = Math.Clamp(maxRows, 1, 50);
+        maxCols = Math.Clamp(maxCols, 1, 30);
+
+        if (atomic is null || atomic.Tables is null || atomic.Tables.Count == 0)
+            return null;
+
+        // Prefer explicit delivery=display|both, then fallback to first non-empty table.
+        var preferred = atomic.Tables
+            .Where(t =>
+                t?.Schema is not null &&
+                (string.Equals(t.Schema.Delivery, "display", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(t.Schema.Delivery, "both", StringComparison.OrdinalIgnoreCase)))
+            .FirstOrDefault(t => t.Table?.Rows is not null && t.Table.Rows.Count > 0);
+
+        var chosen = preferred ?? atomic.Tables.FirstOrDefault(t => t.Table?.Rows is not null && t.Table.Rows.Count > 0);
+        if (chosen is null || chosen.Table is null || chosen.Table.Rows.Count == 0)
+            return null;
+
+        var cols = chosen.Table.Columns.Take(maxCols).Select(c => c.Name).ToArray();
+        var rows = new List<Dictionary<string, object?>>(Math.Min(maxRows, chosen.Table.Rows.Count));
+
+        for (var r = 0; r < Math.Min(maxRows, chosen.Table.Rows.Count); r++)
+        {
+            var src = chosen.Table.Rows[r];
+            var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            for (var c = 0; c < cols.Length; c++)
+            {
+                dict[cols[c]] = src[c];
+            }
+            rows.Add(dict);
+        }
+
+        return new
+        {
+            tableName = chosen.Schema.TableName,
+            tableKind = chosen.Schema.TableKind,
+            delivery = chosen.Schema.Delivery ?? "auto",
+            columns = cols,
+            rowsReturned = chosen.Table.Rows.Count,
+            preview = rows
+        };
+    }
+
+    private static string? TryBuildDisplayPreviewJson(AtomicQueryResult atomic, int maxRows, int maxCols)
+    {
+        var payload = TryBuildDisplayPreviewPayload(atomic, maxRows, maxCols);
+        if (payload is null) return null;
+
+        try
+        {
+            var json = JsonSerializer.Serialize(payload);
+            if (json.Length > 6000)
+                json = json.Substring(0, 6000) + "...";
+            return json;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResult(
         string spName,
         AtomicQueryResult atomic,
         int displayTableCount,
@@ -344,6 +428,20 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
                 }
             }
         });
+
+        // 3) Provide a small, answerable display preview so the assistant can respond without re-calling tools.
+        var displayPreview = TryBuildDisplayPreviewPayload(atomic, maxRows: 12, maxCols: 12);
+        if (displayPreview is not null)
+        {
+            list.Add(new EnvelopeEvidenceItemV1
+            {
+                Id = "display_preview",
+                Type = "list",
+                Title = "Display preview",
+                Payload = displayPreview
+            });
+        }
+
 
         // 3) If summary is missing but we have at least one table, expose a small preview hint.
         if (atomic.Summary is null && atomic.Tables.Count > 0)
@@ -487,7 +585,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         foreach (var kv in parameters)
         {
             var normalized = AtomicCatalogService.NormalizeParamName(kv.Key);
-            if (allowedParams.Contains(normalized))
+            if (allowedParams.Contains(normalized) || ReservedAtomicParams.Contains(normalized))
             {
                 // Keep original key; repository will normalize to @param.
                 filtered[kv.Key] = kv.Value;
