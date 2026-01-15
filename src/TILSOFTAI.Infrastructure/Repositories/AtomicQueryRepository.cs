@@ -68,11 +68,19 @@ public sealed class AtomicQueryRepository : IAtomicQueryRepository
 
     private readonly SqlServerDbContext _dbContext;
     private readonly ILogger<AtomicQueryRepository> _logger;
+    private readonly ITableKindSignalsRepository? _tableKindSignalsRepository;
+    private readonly IAppCache? _cache;
 
-    public AtomicQueryRepository(SqlServerDbContext dbContext, ILogger<AtomicQueryRepository>? logger = null)
+    public AtomicQueryRepository(
+        SqlServerDbContext dbContext,
+        ILogger<AtomicQueryRepository>? logger = null,
+        ITableKindSignalsRepository? tableKindSignalsRepository = null,
+        IAppCache? cache = null)
     {
         _dbContext = dbContext;
         _logger = logger ?? NullLogger<AtomicQueryRepository>.Instance;
+        _tableKindSignalsRepository = tableKindSignalsRepository;
+        _cache = cache;
     }
 
     public async Task<AtomicQueryResult> ExecuteAsync(
@@ -145,11 +153,30 @@ public sealed class AtomicQueryRepository : IAtomicQueryRepository
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
 
 
+        // Optional: load SQL-configured table-kind signals used ONLY for RS0-missing fallback.
+        IReadOnlyList<TableKindSignalRow>? tableKindSignals = null;
+        if (_tableKindSignalsRepository is not null)
+        {
+            var key = $"atomic:tableKindSignals:v1:{conn.DataSource}:{conn.Database}".ToLowerInvariant();
+            if (_cache is not null)
+            {
+                tableKindSignals = await _cache.GetOrAddAsync(
+                    key,
+                    () => _tableKindSignalsRepository.GetEnabledAsync(cancellationToken),
+                    ttl: TimeSpan.FromMinutes(10));
+            }
+            else
+            {
+                tableKindSignals = await _tableKindSignalsRepository.GetEnabledAsync(cancellationToken);
+            }
+        }
+
         // Enforce hard bounds while materializing.
         var options = new SqlAtomicQueryReader.ReadOptions(
             MaxRowsPerTable: Math.Clamp(readOptions.MaxRowsPerTable, 1, 200_000),
             MaxRowsSummary: Math.Clamp(readOptions.MaxRowsSummary, 0, 50_000),
-            MaxSchemaRows: Math.Clamp(readOptions.MaxSchemaRows, 1, 500_000));
+            MaxSchemaRows: Math.Clamp(readOptions.MaxSchemaRows, 1, 500_000),
+            TableKindSignals: tableKindSignals);
 
         var atomic = await SqlAtomicQueryReader.ReadAsync(reader, options, cancellationToken);
 

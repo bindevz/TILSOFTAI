@@ -10,6 +10,7 @@ public sealed class ExecutionContextAccessor
     // LLM enters a tool-calling loop and the circuit breaker trips.
     public int? LastTotalCount { get; set; }
     public string? LastStoredProcedure { get; set; }
+    public IReadOnlyDictionary<string, object?>? LastFilters { get; set; }
     public string? LastSeasonFilter { get; set; }
     public string? LastCollectionFilter { get; set; }
     public string? LastRangeNameFilter { get; set; }

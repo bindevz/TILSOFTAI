@@ -147,6 +147,7 @@ public sealed class ChatPipeline
         _ctxAccessor.AutoInvokeSignatureCounts.Clear();
         _ctxAccessor.LastTotalCount = null;
         _ctxAccessor.LastStoredProcedure = null;
+        _ctxAccessor.LastFilters = null;
         _ctxAccessor.LastSeasonFilter = null;
         _ctxAccessor.LastCollectionFilter = null;
         _ctxAccessor.LastRangeNameFilter = null;
@@ -159,7 +160,7 @@ public sealed class ChatPipeline
         var kernel = _kernelFactory.CreateKernel(request.Model);
 
         // 3) register module plugins (module selection must consider short follow-ups)
-        var modules = _moduleRouter.SelectModules(routingText, context);
+        var modules = await _moduleRouter.SelectModulesAsync(routingText, context, cancellationToken);
 
         // If router cannot detect a module for a short follow-up, fall back to the previous module.
         if (modules.Count == 0 && conversationState?.LastQuery is not null)
@@ -363,14 +364,12 @@ public sealed class ChatPipeline
         if (_ctxAccessor.LastTotalCount is not null)
         {
             var sp = _ctxAccessor.LastStoredProcedure ?? "(unknown)";
-            var season = _ctxAccessor.LastSeasonFilter;
-            var collection = _ctxAccessor.LastCollectionFilter;
-            var range = _ctxAccessor.LastRangeNameFilter;
+            var filters = _ctxAccessor.LastFilters;
             var preview = _ctxAccessor.LastDisplayPreviewJson;
 
             if (lang == ChatLanguage.En)
             {
-                var filterText = BuildFilterTextEn(season, collection, range);
+                var filterText = BuildFilterText(filters);
                 var baseText =
                     $"Total models: {_ctxAccessor.LastTotalCount}." +
                     (string.IsNullOrWhiteSpace(filterText) ? string.Empty : $" Filters: {filterText}.") +
@@ -383,7 +382,7 @@ public sealed class ChatPipeline
             }
             else
             {
-                var filterText = BuildFilterTextVi(season, collection, range);
+                var filterText = BuildFilterText(filters);
                 var baseText =
                     $"Tổng số model: {_ctxAccessor.LastTotalCount}." +
                     (string.IsNullOrWhiteSpace(filterText) ? string.Empty : $" Bộ lọc: {filterText}.") +
@@ -400,21 +399,19 @@ public sealed class ChatPipeline
         return _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
     }
 
-    private static string BuildFilterTextEn(string? season, string? collection, string? range)
+    private static string BuildFilterText(IReadOnlyDictionary<string, object?>? filters)
     {
-        var parts = new List<string>();
-        if (!string.IsNullOrWhiteSpace(season)) parts.Add($"season={season}");
-        if (!string.IsNullOrWhiteSpace(collection)) parts.Add($"collection={collection}");
-        if (!string.IsNullOrWhiteSpace(range)) parts.Add($"range={range}");
-        return string.Join(", ", parts);
-    }
+        if (filters is null || filters.Count == 0)
+            return string.Empty;
 
-    private static string BuildFilterTextVi(string? season, string? collection, string? range)
-    {
-        var parts = new List<string>();
-        if (!string.IsNullOrWhiteSpace(season)) parts.Add($"mùa={season}");
-        if (!string.IsNullOrWhiteSpace(collection)) parts.Add($"bộ sưu tập={collection}");
-        if (!string.IsNullOrWhiteSpace(range)) parts.Add($"range={range}");
+        var parts = new List<string>(filters.Count);
+        foreach (var kv in filters)
+        {
+            if (kv.Value is null) continue;
+            var s = kv.Value.ToString();
+            if (string.IsNullOrWhiteSpace(s)) continue;
+            parts.Add($"{kv.Key}={s}");
+        }
         return string.Join(", ", parts);
     }
 

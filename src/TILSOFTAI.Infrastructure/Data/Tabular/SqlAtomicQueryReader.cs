@@ -1,5 +1,6 @@
 using System.Data.Common;
 using System.Linq;
+using System.Text.RegularExpressions;
 using TILSOFTAI.Domain.ValueObjects;
 
 namespace TILSOFTAI.Infrastructure.Data.Tabular;
@@ -17,7 +18,8 @@ public static class SqlAtomicQueryReader
     public sealed record ReadOptions(
         int MaxRowsPerTable = 20_000,
         int MaxRowsSummary = 500,
-        int MaxSchemaRows = 50_000);
+        int MaxSchemaRows = 50_000,
+        IReadOnlyList<TableKindSignalRow>? TableKindSignals = null);
 
     public static async Task<AtomicQueryResult> ReadAsync(
         DbDataReader reader,
@@ -80,7 +82,7 @@ public static class SqlAtomicQueryReader
         {
             var table = await DbDataReaderTabularMaterializer.ReadAsync(reader, options.MaxRowsPerTable, cancellationToken);
 
-            var kindGuess = GuessTableKind(table);
+            var kindGuess = GuessTableKind(table, options.TableKindSignals);
             var rs = new AtomicResultSetSchema(
                 Index: fallbackIndex,
                 TableName: $"rs{fallbackIndex}",
@@ -109,7 +111,7 @@ public static class SqlAtomicQueryReader
     /// Best-effort classification used only when RS0 schema is missing/unreadable.
     /// We keep this heuristic conservative to avoid mislabeling datasets.
     /// </summary>
-    private static string? GuessTableKind(TabularData table)
+    private static string? GuessTableKind(TabularData table, IReadOnlyList<TableKindSignalRow>? signals)
     {
         if (table.Rows is null || table.Rows.Count == 0) return null;
 
@@ -122,16 +124,44 @@ public static class SqlAtomicQueryReader
                 .Select(n => n.Trim())
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            // Common summary signals in TILSOFT atomic SPs.
-            var summarySignals = new[]
+            // Prefer SQL-configured signals if provided.
+            if (signals is not null && signals.Count > 0)
             {
-                "totalCount", "count", "rowCount", "total", "isDatasetMode",
-                "page", "size", "engineRows", "displayRows",
-                "seasonFilter", "collectionFilter", "rangeNameFilter"
-            };
+                var scoreByKind = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (var s in signals.OrderBy(x => x.Priority))
+                {
+                    if (string.IsNullOrWhiteSpace(s.TableKind) || string.IsNullOrWhiteSpace(s.Pattern))
+                        continue;
 
-            if (summarySignals.Any(s => names.Contains(s)))
-                return "summary";
+                    if (!scoreByKind.TryGetValue(s.TableKind, out var score))
+                        score = 0;
+
+                    if (MatchesAny(names, s))
+                        score += Math.Max(0, s.Weight);
+
+                    scoreByKind[s.TableKind] = score;
+                }
+
+                // Threshold is intentionally conservative; we only want to classify summary confidently.
+                if (scoreByKind.TryGetValue("summary", out var summaryScore) && summaryScore >= 5)
+                    return "summary";
+            }
+            else
+            {
+                // Generic, module-agnostic signals.
+                var generic = new[]
+                {
+                    "totalcount", "rowcount", "count", "isdatasetmode",
+                    "page", "size", "enginerows", "displayrows"
+                };
+
+                if (generic.Any(s => names.Contains(s)))
+                    return "summary";
+
+                // Column suffix pattern commonly used for summary filters.
+                if (names.Any(n => n.EndsWith("filter", StringComparison.OrdinalIgnoreCase)))
+                    return "summary";
+            }
 
             // Fallback: if it has only a few scalar columns, treat as summary.
             if (table.Columns.Count <= 12)
@@ -139,6 +169,25 @@ public static class SqlAtomicQueryReader
         }
 
         return null;
+    }
+
+    private static bool MatchesAny(HashSet<string> columnNames, TableKindSignalRow signal)
+    {
+        if (!signal.IsRegex)
+        {
+            return columnNames.Contains(signal.Pattern);
+        }
+
+        try
+        {
+            var rx = new Regex(signal.Pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(50));
+            return columnNames.Any(n => rx.IsMatch(n));
+        }
+        catch
+        {
+            // Fail-closed: do not match invalid regex.
+            return false;
+        }
     }
 
     // -----------------------------

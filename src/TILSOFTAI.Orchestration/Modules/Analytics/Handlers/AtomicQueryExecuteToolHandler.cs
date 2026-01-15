@@ -309,9 +309,16 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
         _ctxAccessor.LastTotalCount = totalCount;
         _ctxAccessor.LastStoredProcedure = spName;
-        _ctxAccessor.LastSeasonFilter = TryGetStringFromSummary(atomic.Summary?.Table, "seasonFilter");
-        _ctxAccessor.LastCollectionFilter = TryGetStringFromSummary(atomic.Summary?.Table, "collectionFilter");
-        _ctxAccessor.LastRangeNameFilter = TryGetStringFromSummary(atomic.Summary?.Table, "rangeNameFilter");
+        var filters = BuildFiltersFromSummary(atomic);
+        _ctxAccessor.LastFilters = filters;
+
+        // Backward compatible fields used by older fallbacks/logs.
+        _ctxAccessor.LastSeasonFilter = TryGetStringFromSummary(atomic.Summary?.Table, "seasonFilter")
+            ?? (filters.TryGetValue("seasonFilter", out var s) ? s?.ToString() : null);
+        _ctxAccessor.LastCollectionFilter = TryGetStringFromSummary(atomic.Summary?.Table, "collectionFilter")
+            ?? (filters.TryGetValue("collectionFilter", out var c) ? c?.ToString() : null);
+        _ctxAccessor.LastRangeNameFilter = TryGetStringFromSummary(atomic.Summary?.Table, "rangeNameFilter")
+            ?? (filters.TryGetValue("rangeNameFilter", out var r) ? r?.ToString() : null);
         _ctxAccessor.LastDisplayPreviewJson = TryBuildDisplayPreviewJson(atomic, maxRows: 12, maxCols: 12);
     }
 
@@ -391,6 +398,7 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
         var totalCount = TryGetIntFromSummary(atomic.Summary?.Table, "totalCount");
         if (totalCount is not null)
         {
+            var filters = BuildFiltersFromSummary(atomic);
             list.Add(new EnvelopeEvidenceItemV1
             {
                 Id = "total_count",
@@ -400,12 +408,7 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
                 {
                     spName,
                     totalCount,
-                    filters = new
-                    {
-                        season = TryGetStringFromSummary(atomic.Summary?.Table, "seasonFilter"),
-                        collection = TryGetStringFromSummary(atomic.Summary?.Table, "collectionFilter"),
-                        rangeName = TryGetStringFromSummary(atomic.Summary?.Table, "rangeNameFilter")
-                    }
+                    filters
                 }
             });
         }
@@ -499,6 +502,61 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
             return null;
 
         return summary.Rows[0][idx]?.ToString();
+    }
+
+    /// <summary>
+    /// Build a generic filter payload from RS1 summary using deterministic schema.
+    ///
+    /// Rule:
+    /// - Prefer schema columns where semanticType='filter' or role='filter'.
+    /// - Fallback: column name ending with '*Filter'.
+    ///
+    /// This removes hard-coded filter keys (season/collection/range...) to support many modules.
+    /// </summary>
+    private static IReadOnlyDictionary<string, object?> BuildFiltersFromSummary(AtomicQueryResult atomic)
+    {
+        var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
+        var summary = atomic?.Summary;
+        if (summary?.Table is null || summary.Table.Rows.Count == 0)
+            return dict;
+
+        var row = summary.Table.Rows[0];
+        var semByName = new Dictionary<string, (string? role, string? semType)>(StringComparer.OrdinalIgnoreCase);
+
+        if (summary.Schema?.Columns is not null)
+        {
+            foreach (var c in summary.Schema.Columns)
+            {
+                if (string.IsNullOrWhiteSpace(c.Name)) continue;
+                semByName[c.Name] = (c.Role, c.SemanticType);
+            }
+        }
+
+        for (var i = 0; i < summary.Table.Columns.Count; i++)
+        {
+            var name = summary.Table.Columns[i].Name;
+            if (string.IsNullOrWhiteSpace(name)) continue;
+
+            semByName.TryGetValue(name, out var sem);
+
+            var isFilter = string.Equals(sem.semType, "filter", StringComparison.OrdinalIgnoreCase)
+                           || string.Equals(sem.role, "filter", StringComparison.OrdinalIgnoreCase)
+                           || name.EndsWith("Filter", StringComparison.OrdinalIgnoreCase);
+
+            if (!isFilter) continue;
+
+            var v = row.Count() > i ? row[i] : null;
+            if (v is null) continue;
+
+            // Do not include empty strings.
+            if (v is string s && string.IsNullOrWhiteSpace(s))
+                continue;
+
+            dict[name] = v;
+        }
+
+        return dict;
     }
 
     private static int FindColumnIndex(TabularData summary, string columnName)
