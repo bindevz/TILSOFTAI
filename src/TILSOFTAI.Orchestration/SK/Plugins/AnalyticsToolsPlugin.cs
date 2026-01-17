@@ -37,7 +37,7 @@ public sealed class AnalyticsToolsPlugin
     public Task<object> AtomicQueryExecuteAsync(
         [Description("Tên stored procedure. Bắt buộc: có trong catalog và theo chuẩn dbo.TILSOFTAI_sp_*")]
         string spName,
-        [Description("Tham số SP dạng JSON object. Key là tên tham số (có thể bỏ '@'). Tool sẽ lọc theo allow-list trong catalog.")]
+        [Description("Tham số SP dạng JSON object. Key là tên tham số (có thể bỏ '@'). BẮT BUỘC: chỉ dùng các key có trong ParamsJson (atomic.catalog.search -> results[].parameters[].name). Nếu có key lạ, tool sẽ fail-fast để tránh loop/nhầm ngữ cảnh.")]
         JsonElement? @params = null,
         int maxRowsPerTable = 20000,
         int maxRowsSummary = 500,

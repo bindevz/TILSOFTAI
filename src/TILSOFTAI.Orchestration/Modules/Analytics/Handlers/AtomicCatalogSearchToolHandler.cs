@@ -51,6 +51,14 @@ public sealed class AtomicCatalogSearchToolHandler : IToolHandler
             })
         });
 
+        var warnings = new List<string>();
+
+        if (!items.Any())
+            warnings.Add("No catalog hit. Verify dbo.TILSOFTAI_SPCatalog has data, or add the required stored procedure.");
+
+        // Contract guidance: enforce ParamsJson as the source of truth for tool inputs.
+        warnings.Add("Contract: When calling atomic.query.execute, ONLY use parameter names declared in results[].parameters[].name (ParamsJson). Do NOT use output column names from RS1/RS2 (e.g., seasonFilter).");
+
         var payload = new
         {
             kind = "atomic.catalog.search.v1",
@@ -63,9 +71,7 @@ public sealed class AtomicCatalogSearchToolHandler : IToolHandler
                 topK,
                 results = items
             },
-            warnings = items.Count() == 0
-                ? new[] { "No catalog hit. Verify dbo.TILSOFTAI_SPCatalog has data, or add the required stored procedure." }
-                : Array.Empty<string>()
+            warnings = warnings.ToArray()
         };
 
         var evidence = new List<EnvelopeEvidenceItemV1>();

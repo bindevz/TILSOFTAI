@@ -1,10 +1,12 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using System.Collections.Concurrent;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Domain.ValueObjects;
 using TILSOFTAI.Orchestration.SK.Plugins;
 using TILSOFTAI.Orchestration.Tools.FiltersCatalog;
+using TSExecutionContext = TILSOFTAI.Domain.ValueObjects.TSExecutionContext;
 
 namespace TILSOFTAI.Orchestration.SK.Planning;
 

@@ -25,15 +25,6 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 {
     public string ToolName => "atomic.query.execute";
 
-    // Reserved "system" parameters for AtomicQuery paging/dataset mode.
-    // These must never be dropped by catalog allow-lists; otherwise dataset mode (@Page=0)
-    // will silently degrade into list mode and can trigger tool-call loops.
-    private static readonly HashSet<string> ReservedAtomicParams = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "@Page",
-        "@Size"
-    };
-
 
     private readonly AtomicQueryService _atomicQueryService;
     private readonly AnalyticsService _analyticsService;
@@ -129,6 +120,44 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         var allowedParams = AtomicCatalogService.GetAllowedParamNames(catalogEntry.ParamsJson);
         var (filteredParams, droppedParams) = FilterParams(parameters, allowedParams);
 
+        // Strict parameter contract: the caller MUST use exactly the parameter names declared in ParamsJson.
+        // If unknown keys are provided, do not execute SQL (fail-fast) so the LLM can correct its call deterministically.
+        if (allowedParams is null || allowedParams.Count == 0)
+        {
+            var expected = Array.Empty<string>();
+            var payloadMissing = BuildStrictParamFailurePayload(
+                spName,
+                catalogEntry,
+                code: "missing_params_contract",
+                message: "ParamsJson is missing/empty for this stored procedure. Cannot validate input parameters.",
+                expectedParams: expected,
+                receivedParams: parameters.Keys.ToArray());
+
+            var extrasMissing = new ToolDispatchExtras(
+                Source: new EnvelopeSourceV1 { System = "registry", Name = "dbo.TILSOFTAI_SPCatalog", Cache = "na" },
+                Evidence: new[] { new EnvelopeEvidenceItemV1 { Id = "param_contract_missing", Type = "metric", Title = "Parameter contract missing", Payload = new { spName, code = "missing_params_contract" } } });
+
+            return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateFailure("atomic.query.execute blocked: ParamsJson missing", payloadMissing), extrasMissing);
+        }
+
+        if (droppedParams.Count > 0)
+        {
+            var expected = FormatExpectedParamsForHumans(allowedParams);
+            var payloadInvalid = BuildStrictParamFailurePayload(
+                spName,
+                catalogEntry,
+                code: "invalid_parameters",
+                message: "Unknown parameter keys were provided. Use only parameter names declared in ParamsJson (atomic.catalog.search results[].parameters).",
+                expectedParams: expected,
+                receivedParams: parameters.Keys.ToArray());
+
+            var extrasInvalid = new ToolDispatchExtras(
+                Source: new EnvelopeSourceV1 { System = "registry", Name = "dbo.TILSOFTAI_SPCatalog", Cache = "na" },
+                Evidence: new[] { new EnvelopeEvidenceItemV1 { Id = "invalid_parameters", Type = "metric", Title = "Invalid parameters", Payload = new { spName, expected = expected, received = parameters.Keys.ToArray(), dropped = droppedParams } } });
+
+            return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateFailure("atomic.query.execute blocked: invalid parameters", payloadInvalid), extrasInvalid);
+        }
+
         // Normalize semantic parameters (e.g., Season) to improve compatibility with ERP conventions.
         // This runs after governance filtering and before executing the stored procedure.
         // Additionally, if normalization likely caused an empty result (common when DB stores short seasons like "24/25"),
@@ -156,18 +185,13 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
             tableName = atomic.Summary.Schema.TableName,
             tableKind = atomic.Summary.Schema.TableKind,
             schema = atomic.Summary.Schema,
-            table = TrimColumns(atomic.Summary.Table, maxColumns)
+            table = TrimColumns(atomic.Summary.Table, maxColumns),
+            effectiveParams = BuildEffectiveParamsEcho(normalizedParams)
         };
 
         var displayTables = new List<object>();
         var engineDatasets = new List<object>();
         var warnings = new List<string>();
-
-        if (allowedParams.Count == 0)
-            warnings.Add($"Catalog allow-list for '{spName}' is empty/missing. Parameters were accepted, but unknown parameters may be ignored using SQL metadata. Populate ParamsJson in dbo.TILSOFTAI_SPCatalog for stronger governance and better LLM guidance.");
-
-        if (droppedParams.Count > 0)
-            warnings.Add($"Dropped {droppedParams.Count} unknown params (not in catalog allow-list) for '{spName}': {string.Join(", ", droppedParams)}");
 
         foreach (var t in atomic.Tables)
         {
@@ -175,6 +199,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
             var stats = TableStats.From(trimmedTable);
             var decision = DecideDelivery(t.Schema, stats, routing);
 
+            
             if (decision.Display)
             {
                 var displayTable = TrimRows(trimmedTable, routing.MaxDisplayRows);
@@ -247,6 +272,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
                     });
                 }
             }
+
         }
 
         if (displayTables.Count == 0 && engineDatasets.Count == 0)
@@ -411,7 +437,7 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
                     filters
                 }
             });
-        }
+        };
 
         // 2) Always return a minimal execution snapshot.
         list.Add(new EnvelopeEvidenceItemV1
@@ -431,7 +457,6 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
                 }
             }
         });
-
         // 3) Provide a small, answerable display preview so the assistant can respond without re-calling tools.
         var displayPreview = TryBuildDisplayPreviewPayload(atomic, maxRows: 12, maxCols: 12);
         if (displayPreview is not null)
@@ -444,7 +469,6 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
                 Payload = displayPreview
             });
         }
-
 
         // 3) If summary is missing but we have at least one table, expose a small preview hint.
         if (atomic.Summary is null && atomic.Tables.Count > 0)
@@ -643,7 +667,7 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
         foreach (var kv in parameters)
         {
             var normalized = AtomicCatalogService.NormalizeParamName(kv.Key);
-            if (allowedParams.Contains(normalized) || ReservedAtomicParams.Contains(normalized))
+            if (allowedParams.Contains(normalized))
             {
                 // Keep original key; repository will normalize to @param.
                 filtered[kv.Key] = kv.Value;
@@ -655,6 +679,89 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
         }
 
         return (filtered, dropped);
+    }
+
+    private static string[] FormatExpectedParamsForHumans(IReadOnlySet<string> allowedParams)
+    {
+        if (allowedParams is null || allowedParams.Count == 0) return Array.Empty<string>();
+        // Present without '@' for LLM friendliness, but still derived from ParamsJson (source of truth).
+        return allowedParams
+            .Select(p => p.StartsWith("@", StringComparison.Ordinal) ? p.Substring(1) : p)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static IReadOnlyDictionary<string, object?> BuildEffectiveParamsEcho(IReadOnlyDictionary<string, object?> parameters)
+    {
+        var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        if (parameters is null) return dict;
+
+        foreach (var kv in parameters)
+        {
+            var k = kv.Key?.Trim();
+            if (string.IsNullOrWhiteSpace(k)) continue;
+            if (k.StartsWith("@", StringComparison.Ordinal)) k = k.Substring(1);
+
+            object? v = kv.Value;
+            if (v is string s)
+            {
+                s = s.Trim();
+                if (s.Length > 200) s = s.Substring(0, 200) + "...";
+                v = s;
+            }
+            dict[k] = v;
+        }
+        return dict;
+    }
+
+    private static object BuildStrictParamFailurePayload(
+        string spName,
+        AtomicCatalogEntry catalogEntry,
+        string code,
+        string message,
+        IReadOnlyList<string> expectedParams,
+        IReadOnlyList<string> receivedParams)
+    {
+        // Must conform to atomic.query.execute.v1 schema: keep required data fields and carry error details inside data.schema (open object).
+        return new
+        {
+            kind = "atomic.query.execute.v1",
+            schemaVersion = 2,
+            generatedAtUtc = DateTimeOffset.UtcNow,
+            resource = "atomic.query.execute",
+            data = new
+            {
+                storedProcedure = spName,
+                catalog = new
+                {
+                    domain = catalogEntry.Domain,
+                    entity = catalogEntry.Entity,
+                    intent = new { vi = catalogEntry.IntentVi, en = catalogEntry.IntentEn },
+                    tags = catalogEntry.Tags
+                },
+                // Carry contract error info here (data.schema allows arbitrary object).
+                schema = new
+                {
+                    error = new { code, message },
+                    expectedParams,
+                    receivedParams,
+                    example = expectedParams.Count > 0
+                        ? new { Season = "2023/2024,2024/2025", Page = 0, Size = 20000 }
+                        : null
+                },
+                summary = (object?)null,
+                displayTables = Array.Empty<object>(),
+                engineDatasets = Array.Empty<object>()
+            },
+            warnings = new[]
+            {
+                $"{code}: {message}",
+                expectedParams.Count > 0 ? $"Expected params (from ParamsJson): {string.Join(", ", expectedParams)}" : "Expected params (from ParamsJson): <missing>",
+                receivedParams.Count > 0 ? $"Received params: {string.Join(", ", receivedParams)}" : "Received params: <none>",
+                "Rule: When calling atomic.query.execute, ONLY use the parameter names returned by atomic.catalog.search -> results[].parameters[].name. Do not use output column names from RS1/RS2 (e.g., seasonFilter)."
+            }
+        };
     }
 
     /// <summary>
