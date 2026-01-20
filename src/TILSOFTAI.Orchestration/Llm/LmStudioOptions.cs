@@ -7,6 +7,6 @@ public sealed class LmStudioOptions
     public int TimeoutSeconds { get; set; } = 30;
     public Dictionary<string, string> ModelMap { get; set; } = new(StringComparer.OrdinalIgnoreCase)
     {
-        { "TILSOFT-AI", "openai/gpt-oss-20b" }
+        { "TILSOFT-AI", "qwen/qwen3-vl-30b" }
     };
 }

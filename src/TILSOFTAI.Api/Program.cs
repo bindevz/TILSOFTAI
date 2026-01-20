@@ -1,7 +1,14 @@
+using System.Net.Http.Headers;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 using TILSOFTAI.Api.DependencyInjection;
+using TILSOFTAI.Orchestration.Chat;
+using TILSOFTAI.Orchestration.Chat.Localization;
+using TILSOFTAI.Orchestration.Llm;
+using TILSOFTAI.Orchestration.Llm.OpenAi;
+using TILSOFTAI.Orchestration.SK.Conversation;
+using TILSOFTAI.Api.Middleware;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -26,65 +33,40 @@ builder.Services.AddSingleton<TILSOFTAI.Infrastructure.Caching.AppMemoryCache>()
 builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAppCache>(sp =>
     sp.GetRequiredService<TILSOFTAI.Infrastructure.Caching.AppMemoryCache>());
 
-// Atomic Data Engine datasets
 builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAnalyticsDatasetStore, TILSOFTAI.Infrastructure.Caching.InMemoryAnalyticsDatasetStore>();
 
-// ------------------------
 // Tool modularity
-// ------------------------
-// Catalog registries (providers are optional; empty catalog is valid)
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.FiltersCatalog.IFilterCatalogRegistry, TILSOFTAI.Orchestration.Tools.FiltersCatalog.FilterCatalogRegistry>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.Modularity.IFilterCanonicalizer, TILSOFTAI.Orchestration.Tools.Modularity.FilterCanonicalizer>();
-
-// Catalog services used by catalog tool handlers
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.FiltersCatalog.IFilterCatalogService, TILSOFTAI.Orchestration.Tools.FiltersCatalog.FilterCatalogService>();
-
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ActionsCatalog.IActionsCatalogRegistry, TILSOFTAI.Orchestration.Tools.ActionsCatalog.ActionCatalogRegistry>();
-
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.ActionsCatalog.IActionsCatalogService, TILSOFTAI.Orchestration.Tools.ActionsCatalog.ActionsCatalogService>();
 
-// Tool schemas contributed by modules
+// Tool schemas
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolSchemas.IToolInputSpecProvider, TILSOFTAI.Orchestration.Modules.Common.CommonToolInputSpecProvider>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolSchemas.IToolInputSpecProvider, TILSOFTAI.Orchestration.Modules.Analytics.AnalyticsToolInputSpecProvider>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolSchemas.ToolInputSpecCatalog>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolSchemas.DynamicIntentValidator>();
 
-// Tool whitelist definitions contributed by modules
+// Tool whitelist
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.IToolRegistrationProvider, TILSOFTAI.Orchestration.Modules.Common.CommonToolRegistrationProvider>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.IToolRegistrationProvider, TILSOFTAI.Orchestration.Modules.Analytics.AnalyticsToolRegistrationProvider>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolRegistry>();
 
-// Handlers (one handler per tool)
+// Handlers
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler, TILSOFTAI.Orchestration.Modules.Common.Handlers.FiltersCatalogToolHandler>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler, TILSOFTAI.Orchestration.Modules.Common.Handlers.ActionsCatalogToolHandler>();
-
-// Analytics tools
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler, TILSOFTAI.Orchestration.Modules.Analytics.Handlers.AnalyticsRunToolHandler>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler, TILSOFTAI.Orchestration.Modules.Analytics.Handlers.AtomicQueryExecuteToolHandler>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler, TILSOFTAI.Orchestration.Modules.Analytics.Handlers.AtomicCatalogSearchToolHandler>();
 
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.ToolDispatcher>();
-builder.Services.AddSingleton<TILSOFTAI.Orchestration.Llm.TokenBudget>();
-builder.Services.AddScoped<TILSOFTAI.Orchestration.Chat.ChatPipeline>();
-builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAuditLogger, TILSOFTAI.Infrastructure.Observability.AuditLogger>();
-builder.Services.AddScoped<TILSOFTAI.Domain.Interfaces.IConfirmationPlanStore, TILSOFTAI.Infrastructure.Data.SqlConfirmationPlanStore>();
 
-// Filters
+// Filters patching
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.Filters.IFilterPatchMerger, TILSOFTAI.Orchestration.Tools.Filters.FilterPatchMerger>();
 
-// SK planning / governance
-builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.Plugins.PluginCatalog>(sp =>
-    new TILSOFTAI.Orchestration.SK.Plugins.PluginCatalog(typeof(TILSOFTAI.Orchestration.SK.Plugins.AnalyticsToolsPlugin).Assembly));
-builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.Planning.ModuleRouter>();
-builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.Planning.PlannerRouter>();
-builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.Planning.StepwiseLoopRunner>();
-builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.Planning.IPluginExposurePolicy, TILSOFTAI.Orchestration.SK.Planning.DefaultPluginExposurePolicy>();
-builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.Governance.CommitGuardFilter>();
-builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.Governance.AutoInvocationCircuitBreakerFilter>();
-
-// SK plugins (must be registered so PluginCatalog can instantiate them)
-builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.Plugins.AnalyticsToolsPlugin>();
-builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.Plugins.FiltersToolsPlugin>();
+// Audit
+builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAuditLogger, TILSOFTAI.Infrastructure.Observability.AuditLogger>();
 
 // Auto registrations (Application Services + Infrastructure Repositories)
 builder.Services.AddTilsoftaiAutoRegistrations();
@@ -99,57 +81,82 @@ builder.Services.AddSingleton<TILSOFTAI.Orchestration.Contracts.Validation.IResp
     TILSOFTAI.Orchestration.Contracts.Validation.ResponseSchemaValidator>();
 
 // LLM options
-var lmStudioOptions = new TILSOFTAI.Orchestration.Llm.LmStudioOptions();
+var lmStudioOptions = new LmStudioOptions();
 builder.Configuration.GetSection("LmStudio").Bind(lmStudioOptions);
 builder.Services.AddSingleton(lmStudioOptions);
 
+builder.Services.AddHttpClient<OpenAiChatClient>((sp, http) =>
+{
+    var lm = sp.GetRequiredService<LmStudioOptions>();
+    http.BaseAddress = new Uri(lm.BaseUrl.TrimEnd('/') + "/v1/");
+    http.Timeout = TimeSpan.FromSeconds(Math.Clamp(lm.TimeoutSeconds, 5, 300));
+    http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "lm-studio");
+});
+
+builder.Services.AddSingleton<OpenAiToolSchemaFactory>();
+builder.Services.AddSingleton<TokenBudget>();
+
 // Chat tuning
-builder.Services.Configure<TILSOFTAI.Orchestration.Chat.ChatTuningOptions>(builder.Configuration.GetSection("ChatTuning"));
-builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<TILSOFTAI.Orchestration.Chat.ChatTuningOptions>>().Value);
+builder.Services.Configure<ChatTuningOptions>(builder.Configuration.GetSection("ChatTuning"));
+builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<ChatTuningOptions>>().Value);
 
 // Localization
-builder.Services.AddSingleton<TILSOFTAI.Orchestration.Chat.Localization.ILanguageResolver, TILSOFTAI.Orchestration.Chat.Localization.HeuristicLanguageResolver>();
-builder.Services.AddSingleton<TILSOFTAI.Orchestration.Chat.Localization.IChatTextLocalizer, TILSOFTAI.Orchestration.Chat.Localization.DefaultChatTextLocalizer>();
-builder.Services.AddSingleton<TILSOFTAI.Orchestration.Chat.Localization.ChatTextPatterns>();
+builder.Services.AddSingleton<ILanguageResolver, HeuristicLanguageResolver>();
+builder.Services.AddSingleton<IChatTextLocalizer, DefaultChatTextLocalizer>();
+builder.Services.AddSingleton<ChatTextPatterns>();
 
-// SK infra
-builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.SkKernelFactory>();
+// ToolInvoker infra
 builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.ExecutionContextAccessor>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.ToolInvoker>();
 
-// Conversation state (ver20)
-builder.Services.Configure<TILSOFTAI.Orchestration.SK.Conversation.ConversationStateStoreOptions>(builder.Configuration.GetSection("ConversationStateStore"));
-builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<TILSOFTAI.Orchestration.SK.Conversation.ConversationStateStoreOptions>>().Value);
+// Conversation state store
+builder.Services.Configure<ConversationStateStoreOptions>(builder.Configuration.GetSection("ConversationStateStore"));
+builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<ConversationStateStoreOptions>>().Value);
 
-// Only register Redis client when explicitly enabled.
-builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
+builder.Services.AddSingleton<IConversationStateStore>(sp =>
 {
-    var opt = sp.GetRequiredService<TILSOFTAI.Orchestration.SK.Conversation.ConversationStateStoreOptions>();
-    if (!string.Equals(opt.Provider, "Redis", StringComparison.OrdinalIgnoreCase)
-        || string.IsNullOrWhiteSpace(opt.Redis.ConnectionString))
-        throw new InvalidOperationException("Redis is not enabled. Set ConversationStateStore:Provider=Redis and provide ConversationStateStore:Redis:ConnectionString.");
-
-    return ConnectionMultiplexer.Connect(opt.Redis.ConnectionString);
-});
-
-builder.Services.AddSingleton<TILSOFTAI.Orchestration.SK.Conversation.IConversationStateStore>(sp =>
-{
-    var opt = sp.GetRequiredService<TILSOFTAI.Orchestration.SK.Conversation.ConversationStateStoreOptions>();
+    var opt = sp.GetRequiredService<ConversationStateStoreOptions>();
 
     if (string.Equals(opt.Provider, "Redis", StringComparison.OrdinalIgnoreCase)
         && !string.IsNullOrWhiteSpace(opt.Redis.ConnectionString))
     {
-        return new TILSOFTAI.Orchestration.SK.Conversation.RedisConversationStateStore(
-            sp.GetRequiredService<IConnectionMultiplexer>(),
-            opt); // <-- FIX: pass opt, not opt.Redis
+        try
+        {
+            var mux = ConnectionMultiplexer.Connect(opt.Redis.ConnectionString);
+            return new RedisConversationStateStore(mux, opt);
+        }
+        catch
+        {
+            return new InMemoryConversationStateStore(opt);
+        }
     }
 
-    return new TILSOFTAI.Orchestration.SK.Conversation.InMemoryConversationStateStore(opt);
+    return new InMemoryConversationStateStore(opt);
+});
+
+// Chat pipeline (Mode B)
+builder.Services.AddScoped<ChatPipeline>();
+
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("FrontendCors", policy =>
+    {
+        policy.WithOrigins("http://tsl-app.auvietsoft.vn")
+              .AllowAnyHeader()
+              .AllowAnyMethod();
+    });
 });
 
 var app = builder.Build();
 
+// Middleware
+app.UseMiddleware<ExceptionHandlingMiddleware>();
+app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseMiddleware<ConversationIdMiddleware>();
+app.UseMiddleware<RateLimitMiddleware>();
+
 app.UseRouting();
+app.UseCors("FrontendCors");
 app.UseAuthorization();
 app.MapControllers();
 

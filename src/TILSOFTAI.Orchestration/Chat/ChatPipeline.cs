@@ -1,135 +1,111 @@
-﻿using Microsoft.SemanticKernel;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.SemanticKernel.ChatCompletion;
-using Microsoft.SemanticKernel.Connectors.OpenAI;
-using Microsoft.Extensions.DependencyInjection;
-using System.Text.Json;
 using TILSOFTAI.Domain.Interfaces;
-using TILSOFTAI.Orchestration.Llm;
 using TILSOFTAI.Orchestration.Chat.Localization;
-using TILSOFTAI.Orchestration.Contracts.Validation;
+using TILSOFTAI.Orchestration.Llm;
+using TILSOFTAI.Orchestration.Llm.OpenAi;
 using TILSOFTAI.Orchestration.SK;
 using TILSOFTAI.Orchestration.SK.Conversation;
-using TILSOFTAI.Orchestration.SK.Governance;
-using TILSOFTAI.Orchestration.SK.Planning;
-using TILSOFTAI.Orchestration.SK.Plugins;
-using TILSOFTAI.Orchestration.Tools;
-using TSExecutionContext = TILSOFTAI.Domain.ValueObjects.TSExecutionContext;
 
 namespace TILSOFTAI.Orchestration.Chat;
 
+/// <summary>
+/// Manual tool-calling loop (Mode B):
+/// - Call LLM with OpenAI "tools" schema
+/// - Execute tool calls via ToolInvoker
+/// - Append tool results back to the conversation
+/// - Final synthesis pass with tools disabled
+/// </summary>
 public sealed class ChatPipeline
 {
-    private readonly SkKernelFactory _kernelFactory;
+    private static readonly HashSet<string> SupportedRoles = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "system", "user", "assistant", "tool"
+    };
+
+    private readonly OpenAiChatClient _chat;
+    private readonly OpenAiToolSchemaFactory _toolSchemaFactory;
+    private readonly ToolInvoker _toolInvoker;
     private readonly ExecutionContextAccessor _ctxAccessor;
-    private readonly ToolRegistry _toolRegistry;
-    private readonly ToolDispatcher _toolDispatcher;
-    private readonly CommitGuardFilter _commitGuard;
-    private readonly AutoInvocationCircuitBreakerFilter _circuitBreaker;
     private readonly TokenBudget _tokenBudget;
     private readonly IAuditLogger _auditLogger;
-    private readonly PlannerRouter _plannerRouter;
-    private readonly StepwiseLoopRunner _stepwiseLoopRunner;
     private readonly IConversationStateStore _conversationState;
     private readonly ILanguageResolver _languageResolver;
     private readonly IChatTextLocalizer _localizer;
     private readonly ChatTextPatterns _patterns;
     private readonly ChatTuningOptions _tuning;
     private readonly ILogger<ChatPipeline> _logger;
-    private readonly JsonSerializerOptions _serializerOptions = new(JsonSerializerDefaults.Web);
+    private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
 
-    private readonly IServiceProvider _serviceProvider;
-    private readonly PluginCatalog _pluginCatalog;
-    private readonly ModuleRouter _moduleRouter;
-    private readonly IEnumerable<IPluginExposurePolicy> _exposurePolicies;
-
-    //Plugin
+    // Tool list exposed to LLM for this Orchestrator.
+    private static readonly string[] ExposedTools =
+    [
+        "atomic.catalog.search",
+        "atomic.query.execute",
+        "analytics.run"
+    ];
 
     public ChatPipeline(
-        SkKernelFactory kernelFactory,
+        OpenAiChatClient chat,
+        OpenAiToolSchemaFactory toolSchemaFactory,
+        ToolInvoker toolInvoker,
         ExecutionContextAccessor ctxAccessor,
-        ToolRegistry toolRegistry,
-        ToolDispatcher toolDispatcher,
-        CommitGuardFilter commitGuard,
-        AutoInvocationCircuitBreakerFilter circuitBreaker,
         TokenBudget tokenBudget,
         IAuditLogger auditLogger,
-        PlannerRouter plannerRouter,
-        StepwiseLoopRunner stepwiseLoopRunner,
         IConversationStateStore conversationState,
-        IServiceProvider serviceProvider,
-        PluginCatalog pluginCatalog,
-        ModuleRouter moduleRouter,
-        IEnumerable<IPluginExposurePolicy> exposurePolicies,
         ILanguageResolver languageResolver,
         IChatTextLocalizer localizer,
         ChatTextPatterns patterns,
         ChatTuningOptions tuning,
         ILogger<ChatPipeline>? logger = null)
     {
-        _kernelFactory = kernelFactory;
+        _chat = chat;
+        _toolSchemaFactory = toolSchemaFactory;
+        _toolInvoker = toolInvoker;
         _ctxAccessor = ctxAccessor;
-        _toolRegistry = toolRegistry;
-        _toolDispatcher = toolDispatcher;
-        _commitGuard = commitGuard;
-        _circuitBreaker = circuitBreaker;
         _tokenBudget = tokenBudget;
         _auditLogger = auditLogger;
-        _plannerRouter = plannerRouter;
-        _stepwiseLoopRunner = stepwiseLoopRunner;
         _conversationState = conversationState;
         _languageResolver = languageResolver;
         _localizer = localizer;
         _patterns = patterns;
         _tuning = tuning;
-        _serviceProvider = serviceProvider;
-        _pluginCatalog = pluginCatalog;
-        _moduleRouter = moduleRouter;
-        _exposurePolicies = exposurePolicies;
         _logger = logger ?? NullLogger<ChatPipeline>.Instance;
     }
 
-    public async Task<ChatCompletionResponse> HandleAsync(ChatCompletionRequest request, TSExecutionContext context, CancellationToken cancellationToken)
+    public async Task<ChatCompletionResponse> HandleAsync(ChatCompletionRequest request, TILSOFTAI.Domain.ValueObjects.TSExecutionContext context, CancellationToken cancellationToken)
     {
-        var serializedRequest = JsonSerializer.Serialize(request, _serializerOptions);
-
         var incomingMessages = request.Messages ?? Array.Empty<ChatCompletionMessage>();
 
-        if (incomingMessages.Any(m => !IsSupportedRole(m.Role)))
-        {
-            return BuildFailureResponse("Unsupported message role.", request.Model, Array.Empty<ChatCompletionMessage>());
-        }
+        if (incomingMessages.Any(m => !SupportedRoles.Contains(m.Role)))
+            return BuildFailureResponse("Unsupported message role.", request.Model, incomingMessages);
 
-        var hasUser = incomingMessages.Any(m =>
-            string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase) &&
-            !string.IsNullOrWhiteSpace(m.Content));
-
+        var hasUser = incomingMessages.Any(m => string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(m.Content));
         if (!hasUser)
+            return BuildFailureResponse("User message required.", request.Model, incomingMessages);
+
+        var lastUserMessage = incomingMessages.Last(m => string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(m.Content)).Content;
+
+        // Audit: user input (best-effort)
+        try
         {
-            return BuildFailureResponse("User message required.", request.Model, Array.Empty<ChatCompletionMessage>());
+            await _auditLogger.LogUserInputAsync(context, lastUserMessage, cancellationToken);
         }
+        catch { /* ignore */ }
 
-        var lastUserMessage = incomingMessages.Last(m =>
-            string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase) &&
-            !string.IsNullOrWhiteSpace(m.Content)).Content;
 
-        // Build a routing text that is robust for short follow-up questions like
-        // "mùa 24/25?" which rely on prior context (e.g., the previous user question).
-        var routingText = BuildRoutingText(incomingMessages, lastUserMessage);
-
-        // Conversation state helps route short follow-ups that omit the subject (e.g., "mùa 23/24?").
-        // It also allows server-side filter patching in ToolInvoker.
+        // Conversation state + reset filters
         var conversationState = await _conversationState.TryGetAsync(context, cancellationToken);
-
-        // Allow user to reset filter context explicitly.
         if (_patterns.IsResetFiltersIntent(lastUserMessage))
         {
             await _conversationState.ClearAsync(context, cancellationToken);
             conversationState = null;
         }
 
-        // Resolve response language for this turn (VI/EN) and persist it per conversation.
+        // Resolve response language and persist.
         var lang = _languageResolver.Resolve(incomingMessages, conversationState);
         conversationState ??= new ConversationState();
         if (!string.Equals(conversationState.PreferredLanguage, lang.ToIsoCode(), StringComparison.OrdinalIgnoreCase))
@@ -138,12 +114,12 @@ public sealed class ChatPipeline
             await _conversationState.UpsertAsync(context, conversationState, cancellationToken);
         }
 
-        // 1) set context for plugins/filters
-        _ctxAccessor.CircuitBreakerTripped = false;
-        _ctxAccessor.CircuitBreakerReason = null;
+        // Set request context for ToolInvoker
         _ctxAccessor.Context = context;
         _ctxAccessor.ConfirmedConfirmationId = _patterns.TryExtractConfirmationId(lastUserMessage);
         _ctxAccessor.AutoInvokeCount = 0;
+        _ctxAccessor.CircuitBreakerTripped = false;
+        _ctxAccessor.CircuitBreakerReason = null;
         _ctxAccessor.AutoInvokeSignatureCounts.Clear();
         _ctxAccessor.LastTotalCount = null;
         _ctxAccessor.LastStoredProcedure = null;
@@ -156,392 +132,233 @@ public sealed class ChatPipeline
         _logger.LogInformation("ChatPipeline start requestId={RequestId} traceId={TraceId} convId={ConversationId} userId={UserId} lang={Lang} model={Model} msgs={MsgCount}",
             context.RequestId, context.TraceId, context.ConversationId, context.UserId, lang.ToIsoCode(), request.Model, incomingMessages.Count);
 
-        // 2) build kernel
-        var kernel = _kernelFactory.CreateKernel(request.Model);
-
-        // 3) register module plugins (module selection must consider short follow-ups)
-        var modules = await _moduleRouter.SelectModulesAsync(routingText, context, cancellationToken);
-
-        // If router cannot detect a module for a short follow-up, fall back to the previous module.
-        if (modules.Count == 0 && conversationState?.LastQuery is not null)
+        // Build OpenAI messages
+        var systemPrompt = BuildSystemPrompt(lang, conversationState);
+        var messages = new List<OpenAiChatMessage>
         {
-            var module = conversationState.LastQuery.Resource.Split('.', 2, StringSplitOptions.RemoveEmptyEntries)[0];
-            if (!string.IsNullOrWhiteSpace(module))
-            {
-                modules = new[] { module, "common" };
-            }
-        }
-
-        foreach (var module in modules)
-        {
-            if (!_pluginCatalog.ByModule.TryGetValue(module, out var types)) continue;
-
-            var policy = _exposurePolicies.First(p => p.CanHandle(module));
-            var selectedTypes = policy.Select(module, types, routingText);
-            if (selectedTypes.Count == 0) selectedTypes = types;
-
-            foreach (var t in selectedTypes)
-            {
-                var plugin = _serviceProvider.GetRequiredService(t);
-                var pluginName = ToPluginName(t.Name);
-                kernel.Plugins.AddFromObject(plugin, pluginName);
-            }
-        }
-
-        // If this looks like an ERP/business question (modules selected) but no tools are
-        // actually exposed, do not let the model hallucinate tool calls. Return a clear
-        // feature-not-available response instead.
-        var exposedFunctionCount = kernel.Plugins.SelectMany(p => p).Count();
-        if (modules.Count > 0 && exposedFunctionCount == 0)
-        {
-            var fallback = _localizer.Get(ChatTextKeys.FeatureNotAvailable, lang);
-            return BuildResponse(request.Model ?? "TILSOFT-AI", fallback, incomingMessages);
-        }
-
-        // 4) governance filter: chọn 1 trong 2 dòng dưới tùy interface bạn implement
-        // Nếu CommitGuardFilter : IAutoFunctionInvocationFilter
-        kernel.AutoFunctionInvocationFilters.Add(_circuitBreaker);
-        kernel.AutoFunctionInvocationFilters.Add(_commitGuard);
-        // Nếu CommitGuardFilter : IFunctionInvocationFilter thì dùng:
-        // kernel.FunctionInvocationFilters.Add(_commitGuard);
-
-        // 5) build chat history
-        var history = new ChatHistory();
-
-        history.AddSystemMessage(_localizer.Get(ChatTextKeys.SystemPrompt, lang));
-
-        // Provide a compact, machine-readable hint about the last query when the user turn is likely a follow-up.
-        // This improves tool selection and filter continuity without hard-coding filter keys.
-        if (conversationState?.LastQuery is not null && _patterns.IsLikelyFollowUp(lastUserMessage))
-        {
-            var hint = JsonSerializer.Serialize(new
-            {
-                kind = "tilsoft.conversation_state.v1",
-                lastQuery = new
-                {
-                    resource = conversationState.LastQuery.Resource,
-                    filters = conversationState.LastQuery.Filters,
-                    updatedAtUtc = conversationState.LastQuery.UpdatedAtUtc
-                }
-            }, _serializerOptions);
-
-            history.AddSystemMessage(_localizer.Get(ChatTextKeys.PreviousQueryHint, lang) + hint);
-        }
+            new() { Role = "system", Content = systemPrompt }
+        };
 
         foreach (var m in incomingMessages)
         {
-            if (string.IsNullOrWhiteSpace(m.Content)) continue;
-            if (string.Equals(m.Role, "system", StringComparison.OrdinalIgnoreCase)) continue;
+            // Do not allow client to override system prompt.
+            if (string.Equals(m.Role, "system", StringComparison.OrdinalIgnoreCase))
+                continue;
 
-            history.AddMessage(ToAuthorRole(m.Role), m.Content);
+            messages.Add(new OpenAiChatMessage { Role = m.Role, Content = m.Content });
         }
 
-        // If no tools are exposed, do NOT use tool-calling settings. Some models
-        // (LM Studio/open-source) may emit pseudo tool-call text in content when
-        // tools are unavailable. We force a plain chat completion instead.
-        if (exposedFunctionCount == 0)
+        // Build tools
+        var tools = _toolSchemaFactory.BuildTools(ExposedTools);
+
+        // Planner loop
+        var mappedModel = _chat.MapModel(request.Model);
+        var maxSteps = Math.Clamp(_tuning.MaxToolSteps, 1, 20);
+
+        OpenAiChatCompletionResponse? lastResp = null;
+
+        for (var step = 0; step < maxSteps; step++)
         {
-            var noToolsContent = await RespondWithoutToolsAsync(request.Model, history, lang, cancellationToken);
-            await _auditLogger.LogUserInputAsync(context, serializedRequest, cancellationToken);
-            var noToolsResponse = BuildResponse(request.Model ?? "TILSOFT-AI", noToolsContent, incomingMessages);
-            _tokenBudget.EnsureWithinBudget(noToolsResponse.Choices.First().Message.Content);
-            return noToolsResponse;
+            var call = new OpenAiChatCompletionRequest
+            {
+                Model = mappedModel,
+                Messages = messages,
+                Tools = tools.ToList(),
+                ToolChoice = "auto",
+                Temperature = request.Temperature ?? _tuning.ToolCallTemperature,
+                MaxTokens = request.MaxTokens ?? _tuning.MaxTokens,
+                Stream = false
+            };
+
+            lastResp = await _chat.CreateChatCompletionAsync(call, cancellationToken);
+            var choice = lastResp.Choices.FirstOrDefault();
+            if (choice?.Message is null)
+                break;
+
+            var assistantMsg = choice.Message;
+            messages.Add(assistantMsg);
+
+            // No tool calls -> final answer candidate
+            if (assistantMsg.ToolCalls is null || assistantMsg.ToolCalls.Count == 0)
+            {
+                var final = assistantMsg.Content;
+                if (string.IsNullOrWhiteSpace(final))
+                    final = _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
+
+                // Ensure final output is Markdown 3-block. Run synthesis pass with tools disabled.
+                final = await SynthesizeFinalAsync(mappedModel, messages, lang, cancellationToken);
+
+                // Audit: AI output (best-effort)
+                try
+                {
+                    await _auditLogger.LogAiDecisionAsync(context, final, cancellationToken);
+                }
+                catch { /* ignore */ }
+
+                return MapToApiResponse(lastResp, request.Model ?? "TILSOFT-AI", final, incomingMessages);
+            }
+
+            // Execute tools
+            foreach (var tc in assistantMsg.ToolCalls)
+            {
+                var toolName = tc.Function.Name;
+                var argsJson = tc.Function.Arguments ?? "{}";
+
+                // Circuit breaker by signature
+                var signature = ComputeSignature(toolName, argsJson);
+                _ctxAccessor.AutoInvokeSignatureCounts.TryGetValue(signature, out var count);
+                count++;
+                _ctxAccessor.AutoInvokeSignatureCounts[signature] = count;
+                if (count > 2)
+                {
+                    _ctxAccessor.CircuitBreakerTripped = true;
+                    _ctxAccessor.CircuitBreakerReason = $"Repeated tool call signature: {toolName}";
+
+                    var forced = await SynthesizeFinalAsync(mappedModel, messages, lang, cancellationToken);
+                    return MapToApiResponse(lastResp, request.Model ?? "TILSOFT-AI", forced, incomingMessages);
+                }
+
+                JsonElement argsElement;
+                try
+                {
+                    using var doc = JsonDocument.Parse(argsJson);
+                    argsElement = doc.RootElement.Clone();
+                }
+                catch
+                {
+                    using var doc = JsonDocument.Parse("{}");
+                    argsElement = doc.RootElement.Clone();
+                }
+
+                var toolResult = await _toolInvoker.ExecuteAsync(toolName, argsElement, cancellationToken);
+                var toolResultJson = JsonSerializer.Serialize(toolResult, _json);
+
+                messages.Add(new OpenAiChatMessage
+                {
+                    Role = "tool",
+                    ToolCallId = tc.Id,
+                    Content = toolResultJson
+                });
+            }
         }
 
-        // 6) 01 model - internal routing
-        var useLoop = _plannerRouter.ShouldUseLoop(lastUserMessage);
-
-        string content;
-        try
-        {
-            if (useLoop)
-            {
-                content = await _stepwiseLoopRunner.RunAsync(kernel, history, maxIterations: 8, cancellationToken);
-            }
-            else
-            {
-                content = await GetAssistantAnswerAsync(request.Model, kernel, history, lang, cancellationToken);
-            }
-
-            // Defensive: if some path returns empty content, force a no-tools synthesis pass.
-            if (string.IsNullOrWhiteSpace(content))
-            {
-                _logger.LogWarning("ChatPipeline got empty content after tool/loop path; forcing no-tools synthesis. autoInvokes={AutoInvokes}", _ctxAccessor.AutoInvokeCount);
-                content = await SynthesizeWithoutToolsAsync(request.Model, history, lang, cancellationToken);
-            }
-
-            // thấy marker / flag thì xóa content để ép synthesis
-            _logger.LogWarning("ChatPipeline circuit breaker check tripped={Tripped} reason={Reason} autoInvokes={AutoInvokes} signatures={SigCount} contentPreview={Preview}",
-                    _ctxAccessor.CircuitBreakerTripped, _ctxAccessor.CircuitBreakerReason, _ctxAccessor.AutoInvokeCount, _ctxAccessor.AutoInvokeSignatureCounts.Count,
-                    content.Length > 200 ? content.Substring(0, 200) : content);
-
-            if (_ctxAccessor.CircuitBreakerTripped ||
-                content.StartsWith("CIRCUIT_BREAKER", StringComparison.OrdinalIgnoreCase) ||
-                content.Contains("\"circuit_breaker\"", StringComparison.OrdinalIgnoreCase))
-            {
-                // Circuit breaker triggered: do NOT call the LLM again. Build a deterministic fallback
-                // using the last known tool evidence captured during this request.
-                content = BuildCircuitBreakerFallback(lang);
-            }
-
-            // Absolute safety: never return empty assistant content to the client.
-            if (string.IsNullOrWhiteSpace(content))
-            {
-                content = _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
-            }
-        }
-        catch (ToolContractViolationException ex)
-        {
-            // Non-retryable server-side contract drift. Do not call the LLM again.
-            return BuildFailureResponse(ex.Message, request.Model, incomingMessages);
-        }
-        catch
-        {
-            return BuildFailureResponse("AI response unavailable.", request.Model, incomingMessages);
-        }
-
-        await _auditLogger.LogUserInputAsync(context, serializedRequest, cancellationToken);
-
-        _logger.LogInformation("ChatPipeline end breakerTripped={Tripped} autoInvokes={AutoInvokes} finalContentLen={Len}", _ctxAccessor.CircuitBreakerTripped, _ctxAccessor.AutoInvokeCount, content?.Length ?? 0);
-
-        var response = BuildResponse(request.Model ?? "TILSOFT-AI", content, incomingMessages);
-        _tokenBudget.EnsureWithinBudget(response.Choices.First().Message.Content);
-        return response;
+        // Step limit reached -> synthesize anyway.
+        var fallbackFinal = await SynthesizeFinalAsync(mappedModel, messages, lang, cancellationToken);
+        return MapToApiResponse(lastResp, request.Model ?? "TILSOFT-AI", fallbackFinal, incomingMessages);
     }
 
-    private async Task<string> GetAssistantAnswerAsync(
-        string? requestedModel,
-        Kernel kernel,
-        ChatHistory history,
-        ChatLanguage lang,
-        CancellationToken cancellationToken)
+    private string BuildSystemPrompt(ChatLanguage lang, ConversationState? state)
     {
-        var chat = kernel.GetRequiredService<IChatCompletionService>();
-        var settings = new OpenAIPromptExecutionSettings
+        var basePrompt = _localizer.Get(ChatTextKeys.SystemPrompt, lang);
+
+        // Provide prior query hint to help short follow-ups.
+        if (state?.LastQuery is not null)
         {
-            FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(),
-            Temperature = (float)_tuning.ToolCallTemperature
+            var hint = _localizer.Get(ChatTextKeys.PreviousQueryHint, lang);
+            basePrompt += "\n\n" + hint + JsonSerializer.Serialize(state.LastQuery, _json);
+        }
+
+        basePrompt += "\n\nOUTPUT FORMAT (Markdown only):\n" +
+                      "- ## Kết luận / Insight\n" +
+                      "- ## Preview dữ liệu của Kết luận / Insight (Markdown table)\n" +
+                      "- ## Preview danh sách (Markdown table, chỉ khi có dữ liệu danh sách)\n";
+
+        basePrompt += "\n\nTool rule: nếu cần chọn stored procedure theo domain/ngữ cảnh, luôn gọi atomic.catalog.search trước, sau đó atomic.query.execute. Nếu cần phân tích sâu (group/pivot/sum/avg/topN), dùng analytics.run với datasetId từ atomic.query.execute.";
+
+        return basePrompt;
+    }
+
+    private async Task<string> SynthesizeFinalAsync(string mappedModel, List<OpenAiChatMessage> messages, ChatLanguage lang, CancellationToken ct)
+    {
+        // Build a synthesis request: tools disabled.
+        var instruction = _localizer.Get(ChatTextKeys.SynthesizeNoTools, lang) +
+                         "\n\nBắt buộc output theo đúng 3 mục Markdown như sau:\n" +
+                         "## Kết luận / Insight\n...\n\n## Preview dữ liệu của Kết luận / Insight\n(bảng markdown)\n\n## Preview danh sách\n(nếu có)";
+
+        // Ensure the synthesis instruction is applied as system prompt for the final call.
+        var synthMessages = new List<OpenAiChatMessage>();
+        var firstSystem = messages.FirstOrDefault(m => m.Role == "system");
+        var system = (firstSystem?.Content ?? string.Empty) + "\n\n" + instruction;
+        synthMessages.Add(new OpenAiChatMessage { Role = "system", Content = system });
+
+        foreach (var m in messages.Skip(1))
+            synthMessages.Add(m);
+
+        var req = new OpenAiChatCompletionRequest
+        {
+            Model = mappedModel,
+            Messages = synthMessages,
+            Tools = null,
+            ToolChoice = null,
+            Temperature = _tuning.SynthesisTemperature,
+            MaxTokens = Math.Clamp(_tuning.MaxTokens, 256, 4000),
+            Stream = false
         };
 
-        var msg = await chat.GetChatMessageContentAsync(history, settings, kernel, cancellationToken);
-        var content = (msg.Content ?? string.Empty).Trim();
+        var resp = await _chat.CreateChatCompletionAsync(req, ct);
+        var msg = resp.Choices.FirstOrDefault()?.Message;
+        var content = msg?.Content;
 
-        // If the model executed tools but returned empty content, do a forced synthesis
-        // pass with no tools exposed. This prevents empty assistant outputs from reaching
-        // the client and avoids relying on any sentinel tokens.
         if (string.IsNullOrWhiteSpace(content))
-        {
-            content = await SynthesizeWithoutToolsAsync(requestedModel, history, lang, cancellationToken);
-        }
+            content = _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
 
         return content;
     }
 
-    private async Task<string> RespondWithoutToolsAsync(
-        string? requestedModel,
-        ChatHistory history,
-        ChatLanguage lang,
-        CancellationToken cancellationToken)
+    private static string ComputeSignature(string toolName, string argsJson)
     {
-        // New kernel without plugins => no tools can be called.
-        // This avoids LM Studio/open-source models emitting pseudo tool-call text.
-        var kernel2 = _kernelFactory.CreateKernel(requestedModel);
-        var chat2 = kernel2.GetRequiredService<IChatCompletionService>();
-
-        // Add a short instruction: answer normally, do not attempt tool calling.
-        history.AddSystemMessage(_localizer.Get(ChatTextKeys.NoToolsMode, lang));
-
-        var msg2 = await chat2.GetChatMessageContentAsync(history, new OpenAIPromptExecutionSettings { Temperature = (float)_tuning.NoToolsTemperature }, kernel2, cancellationToken);
-        var final = (msg2.Content ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(final))
-            final = _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
-        return final;
+        var input = Encoding.UTF8.GetBytes(toolName + "|" + argsJson);
+        var hash = SHA256.HashData(input);
+        return toolName + ":" + Convert.ToHexString(hash);
     }
 
-    private string BuildCircuitBreakerFallback(ChatLanguage lang)
+    private ChatCompletionResponse MapToApiResponse(OpenAiChatCompletionResponse? raw, string model, string assistantContent, IReadOnlyCollection<ChatCompletionMessage> incoming)
     {
-        // Prefer deterministic metrics captured from the last successful atomic.query.execute.
-        if (_ctxAccessor.LastTotalCount is not null)
+        var usage = raw?.Usage;
+        var apiUsage = new ChatUsage
         {
-            var sp = _ctxAccessor.LastStoredProcedure ?? "(unknown)";
-            var filters = _ctxAccessor.LastFilters;
-            var preview = _ctxAccessor.LastDisplayPreviewJson;
-
-            if (lang == ChatLanguage.En)
-            {
-                var filterText = BuildFilterText(filters);
-                var baseText =
-                    $"Total models: {_ctxAccessor.LastTotalCount}." +
-                    (string.IsNullOrWhiteSpace(filterText) ? string.Empty : $" Filters: {filterText}.") +
-                    $" (source: {sp})";
-
-                if (!string.IsNullOrWhiteSpace(preview))
-                    baseText += "\n\nPreview:\n" + preview;
-
-                return baseText;
-            }
-            else
-            {
-                var filterText = BuildFilterText(filters);
-                var baseText =
-                    $"Tổng số model: {_ctxAccessor.LastTotalCount}." +
-                    (string.IsNullOrWhiteSpace(filterText) ? string.Empty : $" Bộ lọc: {filterText}.") +
-                    $" (nguồn: {sp})";
-
-                if (!string.IsNullOrWhiteSpace(preview))
-                    baseText += "\n\nPreview:\n" + preview;
-
-                return baseText;
-            }
-        }
-
-        // As a safe last resort, return a non-empty localized message.
-        return _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
-    }
-
-    private static string BuildFilterText(IReadOnlyDictionary<string, object?>? filters)
-    {
-        if (filters is null || filters.Count == 0)
-            return string.Empty;
-
-        var parts = new List<string>(filters.Count);
-        foreach (var kv in filters)
-        {
-            if (kv.Value is null) continue;
-            var s = kv.Value.ToString();
-            if (string.IsNullOrWhiteSpace(s)) continue;
-            parts.Add($"{kv.Key}={s}");
-        }
-        return string.Join(", ", parts);
-    }
-
-    private async Task<string> SynthesizeWithoutToolsAsync(
-        string? requestedModel,
-        ChatHistory history,
-        ChatLanguage lang,
-        CancellationToken cancellationToken)
-    {
-        // Add a short instruction to produce a final answer based on evidence already in history.
-        history.AddSystemMessage(_localizer.Get(ChatTextKeys.SynthesizeNoTools, lang));
-
-        // New kernel without plugins => no tools can be called.
-        var kernel2 = _kernelFactory.CreateKernel(requestedModel);
-        var chat2 = kernel2.GetRequiredService<IChatCompletionService>();
-        var msg2 = await chat2.GetChatMessageContentAsync(history, new OpenAIPromptExecutionSettings { Temperature = (float)_tuning.SynthesisTemperature }, kernel2, cancellationToken);
-        var final = (msg2.Content ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(final))
-            final = _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
-        return final;
-    }
-
-    private ChatCompletionResponse BuildFailureResponse(string error, string? model, IReadOnlyCollection<ChatCompletionMessage> promptMessages)
-    {
-        var payload = JsonSerializer.Serialize(new { error }, _serializerOptions);
-        return BuildResponse(model, payload, promptMessages);
-    }
-
-    private ChatCompletionResponse BuildResponse(string? model, string content, IReadOnlyCollection<ChatCompletionMessage> promptMessages)
-    {
-        var completionTokens = _tokenBudget.EstimateTokens(content);
-        var promptTokens = _tokenBudget.EstimateMessageTokens(promptMessages);
+            PromptTokens = usage?.PromptTokens ?? 0,
+            CompletionTokens = usage?.CompletionTokens ?? 0,
+            TotalTokens = usage?.TotalTokens ?? 0
+        };
 
         return new ChatCompletionResponse
         {
-            Id = $"chatcmpl-{Guid.NewGuid():N}",
-            Object = "chat.completion",
-            Created = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-            Model = model ?? "lmstudio",
+            Id = raw?.Id ?? Guid.NewGuid().ToString("N"),
+            Object = raw?.Object ?? "chat.completion",
+            Created = raw?.Created ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            Model = model,
+            Usage = apiUsage,
             Choices = new[]
             {
                 new ChatCompletionChoice
                 {
                     Index = 0,
                     FinishReason = "stop",
-                    Message = new ChatCompletionMessage
-                    {
-                        Role = "assistant",
-                        Content = content
-                    }
+                    Message = new ChatCompletionMessage { Role = "assistant", Content = assistantContent }
                 }
-            },
-            Usage = new ChatUsage
-            {
-                PromptTokens = promptTokens,
-                CompletionTokens = completionTokens,
-                TotalTokens = promptTokens + completionTokens
             }
         };
     }
 
-    //private static bool IsSupportedRole(string? role)
-    //{
-    //    return string.Equals(role, "user", StringComparison.OrdinalIgnoreCase) ||
-    //           string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase) ||
-    //           string.Equals(role, "system", StringComparison.OrdinalIgnoreCase);
-    //}
-    private static AuthorRole ToAuthorRole(string? role)
+    private static ChatCompletionResponse BuildFailureResponse(string message, string? model, IReadOnlyCollection<ChatCompletionMessage> incoming)
     {
-        if (string.Equals(role, "user", StringComparison.OrdinalIgnoreCase)) return AuthorRole.User;
-        if (string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase)) return AuthorRole.Assistant;
-        if (string.Equals(role, "system", StringComparison.OrdinalIgnoreCase)) return AuthorRole.System;
-
-        // fallback an toàn: coi như user
-        return AuthorRole.User;
-    }
-
-    private static bool IsSupportedRole(string? role)
-    {
-        return string.Equals(role, "user", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(role, "system", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private string BuildRoutingText(IReadOnlyCollection<ChatCompletionMessage> messages, string lastUserMessage)
-    {
-        var last = (lastUserMessage ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(last)) return string.Empty;
-
-        var parts = new List<string>();
-
-        if (_patterns.IsLikelyFollowUp(last))
+        return new ChatCompletionResponse
         {
-            var prevUsers = messages.Reverse()
-                .Skip(1)
-                .Where(m => string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(m.Content))
-                .Take(3)
-                .Select(m => m.Content!)
-                .Reverse();
-
-            foreach (var u in prevUsers)
-                parts.Add(u);
-
-            var prevAssistant = messages.Reverse()
-                .FirstOrDefault(m => string.Equals(m.Role, "assistant", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(m.Content))
-                ?.Content;
-
-            if (!string.IsNullOrWhiteSpace(prevAssistant))
-                parts.Add(prevAssistant!);
-        }
-
-        parts.Add(last);
-        var routing = string.Join(" ", parts);
-
-        var max = _tuning.MaxRoutingContextChars <= 0 ? 1200 : _tuning.MaxRoutingContextChars;
-        if (routing.Length > max)
-            routing = routing[^max..];
-
-        return routing;
+            Id = Guid.NewGuid().ToString("N"),
+            Object = "chat.completion",
+            Created = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            Model = model ?? "TILSOFT-AI",
+            Usage = new ChatUsage { PromptTokens = 0, CompletionTokens = 0, TotalTokens = 0 },
+            Choices = new[]
+            {
+                new ChatCompletionChoice
+                {
+                    Index = 0,
+                    FinishReason = "stop",
+                    Message = new ChatCompletionMessage { Role = "assistant", Content = message }
+                }
+            }
+        };
     }
-
-    private static string ToPluginName(string typeName)
-    {
-        const string suffix = "ToolsPlugin";
-        var name = typeName.EndsWith(suffix, StringComparison.Ordinal)
-            ? typeName[..^suffix.Length]
-            : typeName;
-
-        if (string.IsNullOrWhiteSpace(name)) return "common";
-        return char.ToLowerInvariant(name[0]) + name.Substring(1);
-    }
-
 }

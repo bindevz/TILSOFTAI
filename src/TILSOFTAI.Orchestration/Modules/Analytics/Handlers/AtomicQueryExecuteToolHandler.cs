@@ -1,7 +1,6 @@
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using TILSOFTAI.Application.Services;
-using TILSOFTAI.Domain.Utilities;
 using TILSOFTAI.Domain.ValueObjects;
 using TILSOFTAI.Orchestration.SK;
 using TILSOFTAI.Orchestration.Contracts;
@@ -158,25 +157,11 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
             return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateFailure("atomic.query.execute blocked: invalid parameters", payloadInvalid), extrasInvalid);
         }
 
-        // Normalize semantic parameters (e.g., Season) to improve compatibility with ERP conventions.
-        // This runs after governance filtering and before executing the stored procedure.
-        // Additionally, if normalization likely caused an empty result (common when DB stores short seasons like "24/25"),
-        // we perform a single, bounded retry using the original value.
-        var seasonNorm = NormalizeSeasonParamsWithInfo(filteredParams, out var normalizedParams);
+        // Parameter normalization is intentionally not performed here.
+        // The LLM should determine appropriate filters and values using the ParamsJson contract from dbo.TILSOFTAI_SPCatalog.
+        var normalizedParams = filteredParams;
 
         var atomic = await _atomicQueryService.ExecuteAsync(spName, normalizedParams, readOptions, cancellationToken);
-
-        if (seasonNorm.Changed && IsLikelyEmptyResult(atomic))
-        {
-            _logger.LogWarning(
-                "AtomicQueryExecute season normalization yielded empty result; retrying once with original season. sp={Sp} original={Orig} normalized={Norm}",
-                spName,
-                seasonNorm.Original,
-                seasonNorm.Normalized);
-
-            var retryParams = ReplaceSeasonValue(normalizedParams, seasonNorm.Original!);
-            atomic = await _atomicQueryService.ExecuteAsync(spName, retryParams, readOptions, cancellationToken);
-        }
 
         // Summary (RS1) is always safe to display (bounded by MaxRowsSummary).
         var summaryPayload = atomic.Summary is null ? null : new
@@ -762,96 +747,6 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
                 "Rule: When calling atomic.query.execute, ONLY use the parameter names returned by atomic.catalog.search -> results[].parameters[].name. Do not use output column names from RS1/RS2 (e.g., seasonFilter)."
             }
         };
-    }
-
-    /// <summary>
-    /// Normalizes common semantic parameters to ERP-friendly canonical forms.
-    /// Currently supports Season: "24/25" => "2024/2025".
-    ///
-    /// This runs after governance filtering and before execution.
-    /// It does not inject new params; it only normalizes existing ones.
-    /// </summary>
-    private sealed record SeasonNormalizationInfo(bool Changed, string? Original, string? Normalized);
-
-    private static SeasonNormalizationInfo NormalizeSeasonParamsWithInfo(
-        IReadOnlyDictionary<string, object?> parameters,
-        out IReadOnlyDictionary<string, object?> normalized)
-    {
-        normalized = parameters;
-
-        if (parameters is null || parameters.Count == 0)
-            return new SeasonNormalizationInfo(false, null, null);
-
-        // Clone into a mutable dictionary.
-        var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-        foreach (var kv in parameters)
-            dict[kv.Key] = kv.Value;
-
-        string? original = null;
-        string? norm = null;
-
-        foreach (var key in dict.Keys.ToList())
-        {
-            var normalizedName = AtomicCatalogService.NormalizeParamName(key);
-            if (!string.Equals(normalizedName, "@Season", StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            var v = dict[key];
-            if (v is null)
-                continue;
-
-            var s = v.ToString();
-            if (string.IsNullOrWhiteSpace(s))
-                continue;
-
-            var normalizedSeason = SeasonNormalizer.NormalizeValue(s);
-            if (!string.Equals(normalizedSeason, s, StringComparison.Ordinal))
-            {
-                original = s;
-                norm = normalizedSeason;
-                dict[key] = normalizedSeason;
-            }
-        }
-
-        normalized = dict;
-        return new SeasonNormalizationInfo(original is not null, original, norm);
-    }
-
-    private static IReadOnlyDictionary<string, object?> ReplaceSeasonValue(
-        IReadOnlyDictionary<string, object?> parameters,
-        string seasonValue)
-    {
-        var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-        foreach (var kv in parameters)
-            dict[kv.Key] = kv.Value;
-
-        foreach (var key in dict.Keys.ToList())
-        {
-            var normalizedName = AtomicCatalogService.NormalizeParamName(key);
-            if (string.Equals(normalizedName, "@Season", StringComparison.OrdinalIgnoreCase))
-            {
-                dict[key] = seasonValue;
-            }
-        }
-
-        return dict;
-    }
-
-    private static bool IsLikelyEmptyResult(AtomicQueryResult atomic)
-    {
-        // Heuristic: if totalCount exists and is > 0, it is not empty.
-        var totalCount = TryGetIntFromSummary(atomic.Summary?.Table, "totalCount");
-        if (totalCount is not null && totalCount > 0)
-            return false;
-
-        // If any display table contains rows, it is not empty.
-        foreach (var t in atomic.Tables)
-        {
-            if (t?.Table?.Rows is not null && t.Table.Rows.Count > 0)
-                return false;
-        }
-
-        return true;
     }
 
     private static object? ConvertJsonValue(JsonElement v)

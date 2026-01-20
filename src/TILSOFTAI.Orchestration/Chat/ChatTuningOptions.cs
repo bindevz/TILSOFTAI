@@ -7,6 +7,17 @@ namespace TILSOFTAI.Orchestration.Chat;
 public sealed class ChatTuningOptions
 {
     /// <summary>
+    /// Max number of tool-calling iterations per user turn (planner loop).
+    /// Recommended: 4 - 10.
+    /// </summary>
+    public int MaxToolSteps { get; set; } = 8;
+
+    /// <summary>
+    /// Default max_tokens for OpenAI-compatible chat completions when the client does not provide one.
+    /// </summary>
+    public int MaxTokens { get; set; } = 1200;
+
+    /// <summary>
     /// Temperature for tool-calling turns (FunctionChoiceBehavior.Auto).
     /// Recommended: 0.0 - 0.2.
     /// </summary>
