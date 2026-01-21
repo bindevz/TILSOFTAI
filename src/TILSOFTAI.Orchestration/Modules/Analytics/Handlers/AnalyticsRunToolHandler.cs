@@ -57,24 +57,39 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
             return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateFailure("analytics.run failed", errorPayload));
         }
 
+        var previewRows = result.Rows.Take(50).ToArray();
+        var payloadEvidence = new
+        {
+            summarySchema = new
+            {
+                columns = result.Schema.Select(c => new { name = c.Name, dataType = c.DataType, displayName = c.DisplayName })
+            },
+            previewRows = new
+            {
+                columns = result.Schema.Select(c => c.Name),
+                rows = previewRows
+            }
+        };
+
         var payload = new
         {
             kind = "analytics.run.v1",
-            schemaVersion = 1,
+            schemaVersion = 2,
             generatedAtUtc = DateTimeOffset.UtcNow,
             resource = "analytics.run",
+            ok = true,
             data = new
             {
-                result.DatasetId,
-                result.RowCount,
-                result.ColumnCount,
+                datasetId = result.DatasetId,
+                rowCount = result.RowCount,
+                columnCount = result.ColumnCount,
                 warnings = result.Warnings
-            }
+            },
+            evidence = payloadEvidence
         };
 
         _ctxAccessor.LastInsightPreviewMarkdown = MarkdownTableRenderer.Render(new AnalyticsSchema(result.Schema), result.Rows);
 
-        var previewRows = result.Rows.Take(50).ToArray();
         var evidence = new List<EnvelopeEvidenceItemV1>
         {
             new EnvelopeEvidenceItemV1
@@ -442,18 +457,27 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
         return new
         {
             kind = "analytics.run.v1",
-            schemaVersion = 1,
+            schemaVersion = 2,
             generatedAtUtc = DateTimeOffset.UtcNow,
             resource = "analytics.run",
+            ok = false,
             data = new
             {
                 datasetId,
+                rowCount = 0,
+                columnCount = 0,
+                warnings = Array.Empty<string>(),
                 error = new
                 {
                     code,
                     message
                 },
                 details = errors is null || errors.Count == 0 ? null : errors.ToArray()
+            },
+            evidence = new
+            {
+                summarySchema = new { columns = Array.Empty<object>() },
+                previewRows = new { columns = Array.Empty<string>(), rows = Array.Empty<object?[]>() }
             }
         };
     }

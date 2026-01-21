@@ -8,6 +8,7 @@ using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Domain.ValueObjects;
 using TILSOFTAI.Infrastructure.Data;
 using TILSOFTAI.Infrastructure.Data.Tabular;
+using TILSOFTAI.Infrastructure.Options;
 
 namespace TILSOFTAI.Infrastructure.Repositories;
 
@@ -70,17 +71,20 @@ public sealed class AtomicQueryRepository : IAtomicQueryRepository
     private readonly ILogger<AtomicQueryRepository> _logger;
     private readonly ITableKindSignalsRepository? _tableKindSignalsRepository;
     private readonly IAppCache? _cache;
+    private readonly SqlOptions _sqlOptions;
 
     public AtomicQueryRepository(
         SqlServerDbContext dbContext,
         ILogger<AtomicQueryRepository>? logger = null,
         ITableKindSignalsRepository? tableKindSignalsRepository = null,
-        IAppCache? cache = null)
+        IAppCache? cache = null,
+        SqlOptions? sqlOptions = null)
     {
         _dbContext = dbContext;
         _logger = logger ?? NullLogger<AtomicQueryRepository>.Instance;
         _tableKindSignalsRepository = tableKindSignalsRepository;
         _cache = cache;
+        _sqlOptions = sqlOptions ?? new SqlOptions();
     }
 
     public async Task<AtomicQueryResult> ExecuteAsync(
@@ -96,7 +100,8 @@ public sealed class AtomicQueryRepository : IAtomicQueryRepository
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = storedProcedure;
         cmd.CommandType = CommandType.StoredProcedure;
-        cmd.CommandTimeout = 60;
+        var timeoutSeconds = _sqlOptions.CommandTimeoutSeconds <= 0 ? 60 : _sqlOptions.CommandTimeoutSeconds;
+        cmd.CommandTimeout = Math.Clamp(timeoutSeconds, 5, 1800);
 
         _logger.LogInformation("AtomicQueryRepository.Execute start sp={Sp} paramCount={ParamCount}", storedProcedure, parameters?.Count ?? 0);
 

@@ -119,6 +119,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
         // Filter params by catalog allow-list (Option 2): drop unknown params and emit warnings.
         var allowedParams = AtomicCatalogService.GetAllowedParamNames(catalogEntry.ParamsJson);
+        var defaultParams = AtomicCatalogService.GetDefaultParamValues(catalogEntry.ParamsJson);
         var (filteredParams, droppedParams) = FilterParams(parameters, allowedParams);
 
         // Strict parameter contract: the caller MUST use exactly the parameter names declared in ParamsJson.
@@ -161,7 +162,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
         // Parameter normalization is intentionally not performed here.
         // The LLM should determine appropriate filters and values using the ParamsJson contract from dbo.TILSOFTAI_SPCatalog.
-        var normalizedParams = filteredParams;
+        var normalizedParams = ApplyDefaults(filteredParams, defaultParams, allowedParams);
 
         var atomic = await _atomicQueryService.ExecuteAsync(spName, normalizedParams, readOptions, cancellationToken);
 
@@ -179,6 +180,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         var displayTables = new List<object>();
         var engineDatasets = new List<object>();
         var warnings = new List<string>();
+        var schemaHintsByTable = ParseSchemaHints(catalogEntry.SchemaHintsJson);
         var schemaDigestTables = new List<object>();
         var engineDatasetDigests = new List<object>();
         TabularData? listPreviewTable = null;
@@ -190,9 +192,12 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
             var decision = DecideDelivery(t.Schema, stats, routing);
 
             var digestColumns = BuildColumnDigests(t.Schema, trimmedTable, Math.Min(maxColumns, 60));
-            var primaryKey = t.Schema.PrimaryKey ?? Array.Empty<string>();
-            var joinHints = ResolveJoinHints(t.Schema, trimmedTable);
-            var foreignKeys = BuildForeignKeys(joinHints, primaryKey);
+            schemaHintsByTable.TryGetValue(t.Schema.TableName, out var tableHints);
+            var primaryKey = ResolvePrimaryKey(t.Schema, tableHints);
+            var joinHints = ResolveJoinHints(t.Schema, tableHints, warnings);
+            var foreignKeys = ResolveForeignKeys(tableHints, joinHints, primaryKey);
+            var measures = ResolveMeasureHints(t.Schema, tableHints);
+            var dimensions = ResolveDimensionHints(t.Schema, tableHints);
 
             schemaDigestTables.Add(new
             {
@@ -202,6 +207,8 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
                 primaryKey,
                 foreignKeys,
                 joinHints,
+                measures,
+                dimensions,
                 columns = digestColumns
             });
 
@@ -265,7 +272,9 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
                         t.Schema.TableName,
                         digestColumns,
                         primaryKey,
-                        joinHints);
+                        joinHints,
+                        measures,
+                        dimensions);
 
                     var dataset = await _analyticsService.CreateDatasetFromTabularAsync(
                         source: "atomic",
@@ -350,7 +359,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         };
 
         // Evidence: provide a compact, stable slice so the client can always render an answer.
-        var evidence = BuildEvidenceFromAtomicResult(spName, atomic, displayTables.Count, engineDatasets.Count, schemaDigest, engineDatasetsDigest);
+        var evidence = BuildEvidenceFromAtomicResult(spName, atomic, displayTables.Count, engineDatasets.Count, schemaDigest, engineDatasetsDigest, warnings);
 
         // Cache key answer hints for deterministic fallback when circuit breaker trips.
         CacheAnswerHints(spName, atomic);
@@ -461,7 +470,8 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
         int displayTableCount,
         int engineDatasetCount,
         object schemaDigest,
-        object engineDatasetsDigest)
+        object engineDatasetsDigest,
+        IReadOnlyList<string> warnings)
     {
         var list = new List<EnvelopeEvidenceItemV1>();
 
@@ -519,6 +529,17 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
             Payload = engineDatasetsDigest
         });
 
+        if (warnings is not null && warnings.Count > 0)
+        {
+            list.Add(new EnvelopeEvidenceItemV1
+            {
+                Id = "warnings",
+                Type = "metric",
+                Title = "Warnings",
+                Payload = new { warnings = warnings.ToArray() }
+            });
+        }
+
         return list;
     }
 
@@ -560,24 +581,189 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
         return list;
     }
 
-    private static IReadOnlyList<string> ResolveJoinHints(AtomicResultSetSchema schema, TabularData table)
+    private sealed record SchemaHintsForeignKey(string Column, string? RefTable, string? RefColumn);
+
+    private sealed record SchemaHintsTable(
+        IReadOnlyList<string> PrimaryKey,
+        IReadOnlyList<SchemaHintsForeignKey> ForeignKeys,
+        IReadOnlyList<string> MeasureHints,
+        IReadOnlyList<string> DimensionHints);
+
+    private static IReadOnlyDictionary<string, SchemaHintsTable> ParseSchemaHints(string? schemaHintsJson)
+    {
+        var dict = new Dictionary<string, SchemaHintsTable>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(schemaHintsJson))
+            return dict;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(schemaHintsJson);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                return dict;
+
+            if (!root.TryGetProperty("tables", out var tablesEl) || tablesEl.ValueKind != JsonValueKind.Array)
+                return dict;
+
+            foreach (var t in tablesEl.EnumerateArray())
+            {
+                if (t.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                var tableName = GetString(t, "tableName");
+                if (string.IsNullOrWhiteSpace(tableName))
+                    continue;
+
+                var primaryKey = ReadStringArray(t, "primaryKey");
+                var measureHints = ReadStringArray(t, "measureHints");
+                var dimensionHints = ReadStringArray(t, "dimensionHints");
+                var foreignKeys = ReadForeignKeys(t);
+
+                dict[tableName!] = new SchemaHintsTable(primaryKey, foreignKeys, measureHints, dimensionHints);
+            }
+        }
+        catch
+        {
+            // Ignore schema hints parse errors.
+        }
+
+        return dict;
+    }
+
+    private static IReadOnlyList<SchemaHintsForeignKey> ReadForeignKeys(JsonElement table)
+    {
+        var list = new List<SchemaHintsForeignKey>();
+        if (!table.TryGetProperty("foreignKeys", out var fkEl) || fkEl.ValueKind != JsonValueKind.Array)
+            return list;
+
+        foreach (var fk in fkEl.EnumerateArray())
+        {
+            if (fk.ValueKind != JsonValueKind.Object)
+                continue;
+
+            var column = GetString(fk, "column");
+            var refTable = GetString(fk, "refTable");
+            var refColumn = GetString(fk, "refColumn");
+
+            if (string.IsNullOrWhiteSpace(column))
+                continue;
+
+            list.Add(new SchemaHintsForeignKey(column!, refTable, refColumn));
+        }
+
+        return list;
+    }
+
+    private static IReadOnlyList<string> ReadStringArray(JsonElement node, string propertyName)
+    {
+        if (!node.TryGetProperty(propertyName, out var arr) || arr.ValueKind != JsonValueKind.Array)
+            return Array.Empty<string>();
+
+        var list = new List<string>();
+        foreach (var v in arr.EnumerateArray())
+        {
+            if (v.ValueKind != JsonValueKind.String)
+                continue;
+
+            var s = v.GetString();
+            if (string.IsNullOrWhiteSpace(s))
+                continue;
+
+            list.Add(s.Trim());
+        }
+
+        return list;
+    }
+
+    private static string? GetString(JsonElement node, string propertyName)
+        => node.TryGetProperty(propertyName, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    private static IReadOnlyList<string> ResolvePrimaryKey(AtomicResultSetSchema schema, SchemaHintsTable? hints)
+    {
+        if (schema.PrimaryKey is { Count: > 0 })
+            return schema.PrimaryKey;
+
+        if (hints?.PrimaryKey is { Count: > 0 })
+            return hints.PrimaryKey;
+
+        return Array.Empty<string>();
+    }
+
+    private static IReadOnlyList<string> ResolveJoinHints(
+        AtomicResultSetSchema schema,
+        SchemaHintsTable? hints,
+        List<string> warnings)
     {
         if (!string.IsNullOrWhiteSpace(schema.JoinHints))
             return ParseJoinHints(schema.JoinHints);
 
-        var names = schema.Columns is not null && schema.Columns.Count > 0
-            ? schema.Columns.Select(c => c.Name)
-            : table.Columns.Select(c => c.Name);
+        if (hints?.ForeignKeys is { Count: > 0 })
+        {
+            return hints.ForeignKeys
+                .Select(fk => fk.Column)
+                .Where(c => !string.IsNullOrWhiteSpace(c))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
 
-        return InferJoinKeys(names, schema.TableName);
+        if (hints?.PrimaryKey is { Count: > 0 })
+            return hints.PrimaryKey;
+
+        warnings.Add($"Join hints missing for table '{schema.TableName}'. Provide RS0 joinHints or SPCatalog.SchemaHintsJson.");
+        return Array.Empty<string>();
     }
 
-    private static IReadOnlyList<string> BuildForeignKeys(IReadOnlyList<string> joinHints, IReadOnlyList<string> primaryKey)
+    private static IReadOnlyList<SchemaHintsForeignKey> ResolveForeignKeys(
+        SchemaHintsTable? hints,
+        IReadOnlyList<string> joinHints,
+        IReadOnlyList<string> primaryKey)
     {
+        if (hints?.ForeignKeys is { Count: > 0 })
+            return hints.ForeignKeys;
+
         var pk = new HashSet<string>(primaryKey ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
-        return joinHints.Where(h => !pk.Contains(h))
+        var list = joinHints.Where(h => !pk.Contains(h))
             .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(h => new SchemaHintsForeignKey(h, null, null))
             .ToList();
+
+        return list;
+    }
+
+    private static IReadOnlyList<string> ResolveMeasureHints(AtomicResultSetSchema schema, SchemaHintsTable? hints)
+    {
+        var fromSchema = ExtractColumnNamesByRole(schema, "measure");
+        if (fromSchema.Count > 0)
+            return fromSchema;
+
+        return hints?.MeasureHints ?? Array.Empty<string>();
+    }
+
+    private static IReadOnlyList<string> ResolveDimensionHints(AtomicResultSetSchema schema, SchemaHintsTable? hints)
+    {
+        var fromSchema = ExtractColumnNamesByRole(schema, "dimension");
+        if (fromSchema.Count > 0)
+            return fromSchema;
+
+        return hints?.DimensionHints ?? Array.Empty<string>();
+    }
+
+    private static IReadOnlyList<string> ExtractColumnNamesByRole(AtomicResultSetSchema schema, string role)
+    {
+        if (schema.Columns is null || schema.Columns.Count == 0)
+            return Array.Empty<string>();
+
+        var list = new List<string>();
+        foreach (var c in schema.Columns)
+        {
+            if (string.IsNullOrWhiteSpace(c.Name))
+                continue;
+
+            if (string.Equals(c.Role, role, StringComparison.OrdinalIgnoreCase))
+                list.Add(c.Name);
+        }
+
+        return list;
     }
 
     private static object BuildEngineDatasetDigest(
@@ -585,7 +771,9 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
         string tableName,
         IReadOnlyList<object> columns,
         IReadOnlyList<string> primaryKey,
-        IReadOnlyList<string> joinHints)
+        IReadOnlyList<string> joinHints,
+        IReadOnlyList<string> measures,
+        IReadOnlyList<string> dimensions)
     {
         return new
         {
@@ -593,7 +781,9 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
             tableName,
             columns,
             primaryKey,
-            joinHints
+            joinHints,
+            measures,
+            dimensions
         };
     }
 
@@ -624,38 +814,6 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
             var colName = ExtractColumnName(token);
             if (seen.Add(colName))
                 list.Add(colName);
-        }
-
-        return list;
-    }
-
-    private static IReadOnlyList<string> InferJoinKeys(IEnumerable<string> columnNames, string? tableName)
-    {
-        var list = new List<string>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var table = (tableName ?? string.Empty).Trim();
-
-        foreach (var name in columnNames)
-        {
-            if (string.IsNullOrWhiteSpace(name))
-                continue;
-
-            var normalized = name.Trim();
-            var isKey = string.Equals(normalized, "ID", StringComparison.OrdinalIgnoreCase)
-                        || normalized.EndsWith("_ID", StringComparison.OrdinalIgnoreCase)
-                        || normalized.EndsWith("Id", StringComparison.OrdinalIgnoreCase);
-
-            if (!string.IsNullOrWhiteSpace(table))
-            {
-                if (string.Equals(normalized, table + "Id", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(normalized, table + "_ID", StringComparison.OrdinalIgnoreCase))
-                {
-                    isKey = true;
-                }
-            }
-
-            if (isKey && seen.Add(normalized))
-                list.Add(normalized);
         }
 
         return list;
@@ -856,6 +1014,43 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
         }
 
         return (filtered, dropped);
+    }
+
+    private static IReadOnlyDictionary<string, object?> ApplyDefaults(
+        IReadOnlyDictionary<string, object?> parameters,
+        IReadOnlyDictionary<string, object?> defaults,
+        IReadOnlySet<string> allowedParams)
+    {
+        var merged = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
+        if (parameters is not null)
+        {
+            foreach (var kv in parameters)
+            {
+                var name = AtomicCatalogService.NormalizeParamName(kv.Key);
+                if (string.IsNullOrWhiteSpace(name))
+                    continue;
+
+                merged[name] = kv.Value;
+            }
+        }
+
+        if (defaults is not null)
+        {
+            foreach (var kv in defaults)
+            {
+                if (string.IsNullOrWhiteSpace(kv.Key))
+                    continue;
+
+                if (allowedParams is not null && allowedParams.Count > 0 && !allowedParams.Contains(kv.Key))
+                    continue;
+
+                if (!merged.ContainsKey(kv.Key))
+                    merged[kv.Key] = kv.Value;
+            }
+        }
+
+        return merged;
     }
 
     private static string[] FormatExpectedParamsForHumans(IReadOnlySet<string> allowedParams)

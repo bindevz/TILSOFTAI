@@ -33,7 +33,34 @@ builder.Services.AddSingleton<TILSOFTAI.Infrastructure.Caching.AppMemoryCache>()
 builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAppCache>(sp =>
     sp.GetRequiredService<TILSOFTAI.Infrastructure.Caching.AppMemoryCache>());
 
-builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAnalyticsDatasetStore, TILSOFTAI.Infrastructure.Caching.InMemoryAnalyticsDatasetStore>();
+builder.Services.Configure<TILSOFTAI.Infrastructure.Caching.AnalyticsDatasetStoreOptions>(
+    builder.Configuration.GetSection("AnalyticsDatasetStore"));
+builder.Services.AddSingleton(sp => sp
+    .GetRequiredService<IOptions<TILSOFTAI.Infrastructure.Caching.AnalyticsDatasetStoreOptions>>()
+    .Value);
+
+builder.Services.AddSingleton<TILSOFTAI.Infrastructure.Caching.InMemoryAnalyticsDatasetStore>();
+builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAnalyticsDatasetStore>(sp =>
+{
+    var opt = sp.GetRequiredService<TILSOFTAI.Infrastructure.Caching.AnalyticsDatasetStoreOptions>();
+    var fallback = sp.GetRequiredService<TILSOFTAI.Infrastructure.Caching.InMemoryAnalyticsDatasetStore>();
+
+    if (string.Equals(opt.Provider, "redis", StringComparison.OrdinalIgnoreCase) &&
+        !string.IsNullOrWhiteSpace(opt.RedisConnection))
+    {
+        try
+        {
+            var mux = ConnectionMultiplexer.Connect(opt.RedisConnection);
+            return new TILSOFTAI.Infrastructure.Caching.RedisAnalyticsDatasetStore(mux, fallback, opt);
+        }
+        catch
+        {
+            return fallback;
+        }
+    }
+
+    return fallback;
+});
 
 // Tool modularity
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.FiltersCatalog.IFilterCatalogRegistry, TILSOFTAI.Orchestration.Tools.FiltersCatalog.FilterCatalogRegistry>();
@@ -70,6 +97,13 @@ builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAuditLogger, TILSOFTA
 
 // Auto registrations (Application Services + Infrastructure Repositories)
 builder.Services.AddTilsoftaiAutoRegistrations();
+
+// SQL options
+builder.Services.Configure<TILSOFTAI.Infrastructure.Options.SqlOptions>(
+    builder.Configuration.GetSection("Sql"));
+builder.Services.AddSingleton(sp => sp
+    .GetRequiredService<IOptions<TILSOFTAI.Infrastructure.Options.SqlOptions>>()
+    .Value);
 
 // Runtime response schema validation
 builder.Services.Configure<TILSOFTAI.Orchestration.Contracts.Validation.ResponseSchemaValidationOptions>(

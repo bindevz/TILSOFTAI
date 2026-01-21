@@ -15,6 +15,7 @@ public sealed record AtomicCatalogEntry(
     string? Tags,
     string? ParamsJson,
     string? ExampleJson,
+    string? SchemaHintsJson,
     DateTimeOffset UpdatedAtUtc);
 
 /// <summary>

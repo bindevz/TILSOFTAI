@@ -49,7 +49,7 @@ public sealed class ToolInputSpec
         get
         {
             var s = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (AllowedFilterKeys.Count > 0 || true) s.Add("filters");
+            if (AllowedFilterKeys.Count > 0) s.Add("filters");
             if (SupportsPaging)
             {
                 s.Add("page");

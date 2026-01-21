@@ -58,12 +58,14 @@ public sealed class OpenAiToolSchemaFactory
         var props = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
         var required = new List<string>();
 
-        // Standard filters object
-        props["filters"] = new
+        if (spec.AllowedFilterKeys.Count > 0)
         {
-            type = "object",
-            additionalProperties = new { type = "string" }
-        };
+            props["filters"] = new
+            {
+                type = "object",
+                additionalProperties = new { type = "string" }
+            };
+        }
 
         if (spec.SupportsPaging)
         {

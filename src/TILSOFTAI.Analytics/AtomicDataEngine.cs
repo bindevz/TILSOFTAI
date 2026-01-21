@@ -378,6 +378,18 @@ public sealed class AtomicDataEngine
                     throw new ArgumentException($"aggregate column '{a.Column}' does not exist.");
             }
 
+            var aggUseDecimal = new bool[step.Aggregates.Count];
+            for (var i = 0; i < step.Aggregates.Count; i++)
+            {
+                var agg = step.Aggregates[i];
+                if (agg.Op == "count" || string.IsNullOrWhiteSpace(agg.Column))
+                    continue;
+
+                var col = df.Columns[colIdx[agg.Column]];
+                if (col is DecimalDataFrameColumn)
+                    aggUseDecimal[i] = true;
+            }
+
             var groups = new Dictionary<string, AggState>(StringComparer.OrdinalIgnoreCase);
 
             for (long i = 0; i < df.Rows.Count; i++)
@@ -393,7 +405,7 @@ public sealed class AtomicDataEngine
                 if (!groups.TryGetValue(key, out var st))
                 {
                     if (groups.Count >= maxGroups) continue; // drop beyond cap
-                    st = new AggState(keyParts, step.Aggregates);
+                    st = new AggState(keyParts, step.Aggregates, aggUseDecimal);
                     groups[key] = st;
                 }
 
@@ -404,8 +416,22 @@ public sealed class AtomicDataEngine
             var resultColumns = new List<DataFrameColumn>();
             foreach (var by in step.By)
                 resultColumns.Add(new StringDataFrameColumn(by, groups.Count));
-            foreach (var a in step.Aggregates)
-                resultColumns.Add(new DoubleDataFrameColumn(a.As, groups.Count));
+            for (var i = 0; i < step.Aggregates.Count; i++)
+            {
+                var agg = step.Aggregates[i];
+                if (agg.Op == "count")
+                {
+                    resultColumns.Add(new DoubleDataFrameColumn(agg.As, groups.Count));
+                }
+                else if (aggUseDecimal[i])
+                {
+                    resultColumns.Add(new DecimalDataFrameColumn(agg.As, groups.Count));
+                }
+                else
+                {
+                    resultColumns.Add(new DoubleDataFrameColumn(agg.As, groups.Count));
+                }
+            }
 
             var outDf = new DataFrame(resultColumns);
             var row = 0;
@@ -415,7 +441,7 @@ public sealed class AtomicDataEngine
                     ((StringDataFrameColumn)outDf.Columns[step.By[k]])[row] = g.KeyParts[k];
 
                 for (var ai = 0; ai < step.Aggregates.Count; ai++)
-                    ((DoubleDataFrameColumn)outDf.Columns[step.Aggregates[ai].As])[row] = g.GetValue(ai);
+                    outDf.Columns[step.Aggregates[ai].As][row] = g.GetValue(ai);
 
                 row++;
             }
@@ -434,8 +460,17 @@ public sealed class AtomicDataEngine
             if (right is null)
                 throw new ArgumentException($"Join rightDatasetId '{step.RightDatasetId}' not found.");
 
-            var leftKeyIndexes = GetColumnIndexes(left, step.LeftKeys);
-            var rightKeyIndexes = GetColumnIndexes(right, step.RightKeys);
+            if (!TryGetColumnIndexes(left, step.LeftKeys, out var leftKeyIndexes, out var leftMissing))
+            {
+                warnings.Add($"Join skipped: left key columns missing: {string.Join(", ", leftMissing)}.");
+                return left;
+            }
+
+            if (!TryGetColumnIndexes(right, step.RightKeys, out var rightKeyIndexes, out var rightMissing))
+            {
+                warnings.Add($"Join skipped: right key columns missing: {string.Join(", ", rightMissing)}.");
+                return left;
+            }
 
             var rightColumns = ResolveRightColumns(right, step);
 
@@ -449,7 +484,8 @@ public sealed class AtomicDataEngine
                 }
             }
 
-            var rightIndex = BuildRightIndex(right, rightKeyIndexes);
+            var maxIndexRows = (int)Math.Min(right.Rows.Count, bounds.MaxJoinRows);
+            var rightIndex = BuildRightIndex(right, rightKeyIndexes, maxIndexRows, bounds.MaxJoinMatchesPerLeft, warnings);
 
             var outRows = new List<object?[]>(capacity: Math.Min(bounds.MaxJoinRows, 1024));
             var truncatedMatches = false;
@@ -498,7 +534,7 @@ public sealed class AtomicDataEngine
             if (truncatedRows)
                 warnings.Add($"Join rows truncated to {bounds.MaxJoinRows} rows.");
 
-            return BuildJoinedDataFrame(left, right, outRows, rightColumns, step.RightPrefix);
+            return BuildJoinedDataFrame(left, right, outRows, rightColumns, step.RightPrefix, warnings);
         }
 
         private sealed record JoinColumn(int Index, string Name);
@@ -523,10 +559,19 @@ public sealed class AtomicDataEngine
             return list;
         }
 
-        private static Dictionary<string, List<long>> BuildRightIndex(DataFrame right, int[] keyIndexes)
+        private static Dictionary<string, List<long>> BuildRightIndex(
+            DataFrame right,
+            int[] keyIndexes,
+            int maxIndexRows,
+            int maxMatchesPerKey,
+            List<string> warnings)
         {
             var index = new Dictionary<string, List<long>>(StringComparer.OrdinalIgnoreCase);
-            for (long i = 0; i < right.Rows.Count; i++)
+            var cappedRows = Math.Max(0, Math.Min((long)maxIndexRows, right.Rows.Count));
+            var truncatedIndexRows = right.Rows.Count > cappedRows;
+            var truncatedMatches = false;
+
+            for (long i = 0; i < cappedRows; i++)
             {
                 var key = BuildCompositeKey(right, keyIndexes, i);
                 if (!index.TryGetValue(key, out var list))
@@ -534,8 +579,21 @@ public sealed class AtomicDataEngine
                     list = new List<long>();
                     index[key] = list;
                 }
+
+                if (list.Count >= maxMatchesPerKey)
+                {
+                    truncatedMatches = true;
+                    continue;
+                }
+
                 list.Add(i);
             }
+
+            if (truncatedIndexRows)
+                warnings.Add($"Join right index truncated to {cappedRows} rows.");
+            if (truncatedMatches)
+                warnings.Add($"Join right index matches capped at {maxMatchesPerKey} per key.");
+
             return index;
         }
 
@@ -582,19 +640,32 @@ public sealed class AtomicDataEngine
             DataFrame right,
             IReadOnlyList<object?[]> rows,
             IReadOnlyList<JoinColumn> rightColumns,
-            string rightPrefix)
+            string rightPrefix,
+            List<string> warnings)
         {
             var rowCount = rows.Count;
             var cols = new List<DataFrameColumn>(left.Columns.Count + rightColumns.Count);
+            var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var c in left.Columns)
+            {
+                usedNames.Add(c.Name);
                 cols.Add(CreateEmptyColumnLike(c, rowCount, c.Name));
+            }
 
+            var renamed = false;
             foreach (var c in rightColumns)
             {
                 var name = rightPrefix + c.Name;
-                cols.Add(CreateEmptyColumnLike(right.Columns[c.Index], rowCount, name));
+                var unique = MakeUniqueName(usedNames, name);
+                if (!string.Equals(unique, name, StringComparison.OrdinalIgnoreCase))
+                    renamed = true;
+
+                cols.Add(CreateEmptyColumnLike(right.Columns[c.Index], rowCount, unique));
             }
+
+            if (renamed)
+                warnings.Add("Join column name collisions detected; some right-side columns were renamed.");
 
             var outDf = new DataFrame(cols);
             for (var r = 0; r < rows.Count; r++)
@@ -609,22 +680,47 @@ public sealed class AtomicDataEngine
             return outDf;
         }
 
-        private static int[] GetColumnIndexes(DataFrame df, IReadOnlyList<string> names)
+        private static string MakeUniqueName(HashSet<string> usedNames, string baseName)
+        {
+            if (usedNames.Add(baseName))
+                return baseName;
+
+            var i = 2;
+            while (true)
+            {
+                var candidate = $"{baseName}_{i}";
+                if (usedNames.Add(candidate))
+                    return candidate;
+                i++;
+            }
+        }
+
+        private static bool TryGetColumnIndexes(
+            DataFrame df,
+            IReadOnlyList<string> names,
+            out int[] indexes,
+            out IReadOnlyList<string> missing)
         {
             var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             for (var i = 0; i < df.Columns.Count; i++)
                 map[df.Columns[i].Name] = i;
 
             var idx = new int[names.Count];
+            var missingList = new List<string>();
             for (var i = 0; i < names.Count; i++)
             {
                 var name = names[i];
                 if (!map.TryGetValue(name, out var index))
-                    throw new ArgumentException($"Join key column '{name}' does not exist.");
+                {
+                    missingList.Add(name);
+                    continue;
+                }
                 idx[i] = index;
             }
 
-            return idx;
+            indexes = idx;
+            missing = missingList;
+            return missingList.Count == 0;
         }
 
         private static DataFrame ApplyColumnLimit(DataFrame df, int maxColumns)
@@ -738,14 +834,18 @@ public sealed class AtomicDataEngine
         {
             public string[] KeyParts { get; }
             private readonly AggregateSpec[] _aggs;
-            private readonly double[] _sum;
+            private readonly bool[] _useDecimal;
+            private readonly decimal[] _decSum;
+            private readonly double[] _dblSum;
             private readonly int[] _count;
 
-            public AggState(string[] keyParts, IReadOnlyList<AggregateSpec> aggs)
+            public AggState(string[] keyParts, IReadOnlyList<AggregateSpec> aggs, bool[] useDecimal)
             {
                 KeyParts = keyParts;
                 _aggs = aggs.ToArray();
-                _sum = new double[_aggs.Length];
+                _useDecimal = useDecimal.ToArray();
+                _decSum = new decimal[_aggs.Length];
+                _dblSum = new double[_aggs.Length];
                 _count = new int[_aggs.Length];
             }
 
@@ -762,43 +862,127 @@ public sealed class AtomicDataEngine
 
                     var val = df.Columns[a.Column!][rowIndex];
                     if (val is null) continue;
-                    if (!double.TryParse(val.ToString(), out var d)) continue;
 
-                    switch (a.Op)
+                    if (_useDecimal[i])
                     {
-                        case "sum":
-                        case "avg":
-                            _sum[i] += d;
-                            _count[i]++;
-                            break;
-                        case "min":
-                            if (_count[i] == 0) _sum[i] = d;
-                            else _sum[i] = Math.Min(_sum[i], d);
-                            _count[i]++;
-                            break;
-                        case "max":
-                            if (_count[i] == 0) _sum[i] = d;
-                            else _sum[i] = Math.Max(_sum[i], d);
-                            _count[i]++;
-                            break;
-                        default:
-                            // treat as sum
-                            _sum[i] += d;
-                            _count[i]++;
-                            break;
+                        if (!TryGetDecimal(val, out var d)) continue;
+                        switch (a.Op)
+                        {
+                            case "sum":
+                            case "avg":
+                                _decSum[i] += d;
+                                _count[i]++;
+                                break;
+                            case "min":
+                                if (_count[i] == 0) _decSum[i] = d;
+                                else _decSum[i] = Math.Min(_decSum[i], d);
+                                _count[i]++;
+                                break;
+                            case "max":
+                                if (_count[i] == 0) _decSum[i] = d;
+                                else _decSum[i] = Math.Max(_decSum[i], d);
+                                _count[i]++;
+                                break;
+                            default:
+                                _decSum[i] += d;
+                                _count[i]++;
+                                break;
+                        }
+                    }
+                    else
+                    {
+                        if (!TryGetDouble(val, out var d)) continue;
+                        switch (a.Op)
+                        {
+                            case "sum":
+                            case "avg":
+                                _dblSum[i] += d;
+                                _count[i]++;
+                                break;
+                            case "min":
+                                if (_count[i] == 0) _dblSum[i] = d;
+                                else _dblSum[i] = Math.Min(_dblSum[i], d);
+                                _count[i]++;
+                                break;
+                            case "max":
+                                if (_count[i] == 0) _dblSum[i] = d;
+                                else _dblSum[i] = Math.Max(_dblSum[i], d);
+                                _count[i]++;
+                                break;
+                            default:
+                                _dblSum[i] += d;
+                                _count[i]++;
+                                break;
+                        }
                     }
                 }
             }
 
-            public double GetValue(int i)
+            public object GetValue(int i)
             {
                 var a = _aggs[i];
-                return a.Op switch
+                if (a.Op == "count")
+                    return (double)_count[i];
+
+                if (_useDecimal[i])
                 {
-                    "count" => _count[i],
-                    "avg" => _count[i] == 0 ? 0 : _sum[i] / _count[i],
-                    _ => _sum[i]
-                };
+                    if (a.Op == "avg")
+                        return _count[i] == 0 ? 0m : _decSum[i] / _count[i];
+                    return _decSum[i];
+                }
+
+                if (a.Op == "avg")
+                    return _count[i] == 0 ? 0d : _dblSum[i] / _count[i];
+
+                return _dblSum[i];
+            }
+
+            private static bool TryGetDecimal(object value, out decimal result)
+            {
+                switch (value)
+                {
+                    case decimal dec:
+                        result = dec;
+                        return true;
+                    case int i:
+                        result = i;
+                        return true;
+                    case long l:
+                        result = l;
+                        return true;
+                    case double d:
+                        result = (decimal)d;
+                        return true;
+                    case float f:
+                        result = (decimal)f;
+                        return true;
+                }
+
+                return decimal.TryParse(value.ToString(), out result);
+            }
+
+            private static bool TryGetDouble(object value, out double result)
+            {
+                switch (value)
+                {
+                    case double d:
+                        result = d;
+                        return true;
+                    case float f:
+                        result = f;
+                        return true;
+                    case decimal dec:
+                        result = (double)dec;
+                        return true;
+                    case int i:
+                        result = i;
+                        return true;
+                    case long l:
+                        result = l;
+                        return true;
+                }
+
+                return double.TryParse(value.ToString(), out result);
             }
         }
     }

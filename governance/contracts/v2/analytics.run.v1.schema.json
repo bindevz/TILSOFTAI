@@ -1,0 +1,164 @@
+﻿{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tilsoftai://contracts/analytics.run.v1",
+  "title": "analytics.run.v1 response",
+  "description": "Atomic data engine analytics run response (bounded evidence).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schemaVersion",
+    "generatedAtUtc",
+    "resource",
+    "ok",
+    "data",
+    "evidence"
+  ],
+  "properties": {
+    "kind": {
+      "const": "analytics.run.v1"
+    },
+    "schemaVersion": {
+      "const": 2
+    },
+    "generatedAtUtc": {
+      "type": "string"
+    },
+    "resource": {
+      "const": "analytics.run"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "datasetId",
+        "rowCount",
+        "columnCount",
+        "warnings"
+      ],
+      "properties": {
+        "datasetId": {
+          "type": "string"
+        },
+        "rowCount": {
+          "type": "integer"
+        },
+        "columnCount": {
+          "type": "integer"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "error": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message"
+          ],
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          }
+        },
+        "details": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summarySchema",
+        "previewRows"
+      ],
+      "properties": {
+        "summarySchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "columns"
+          ],
+          "properties": {
+            "columns": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "dataType",
+                  "displayName"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "dataType": {
+                    "type": "string"
+                  },
+                  "displayName": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "previewRows": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "columns",
+            "rows"
+          ],
+          "properties": {
+            "columns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "rows": {
+              "type": "array",
+              "maxItems": 50,
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "object",
+                    "array",
+                    "null"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

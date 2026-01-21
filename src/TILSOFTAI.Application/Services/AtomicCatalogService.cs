@@ -114,6 +114,22 @@ public sealed class AtomicCatalogService
         return set;
     }
 
+    public static IReadOnlyDictionary<string, object?> GetDefaultParamValues(string? paramsJson)
+    {
+        var specs = ParseParamSpecs(paramsJson);
+        var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in specs)
+        {
+            if (!p.HasDefault)
+                continue;
+
+            var name = NormalizeParamName(p.Name);
+            if (!string.IsNullOrWhiteSpace(name))
+                dict[name] = p.DefaultValue;
+        }
+        return dict;
+    }
+
     private static AtomicCatalogParamSpec ParseParamObject(JsonElement o)
     {
         var name = NormalizeParamName(GetString(o, "name") ?? GetString(o, "param") ?? GetString(o, "key"));
@@ -124,7 +140,8 @@ public sealed class AtomicCatalogService
         var example = GetString(o, "example");
 
         object? def = null;
-        if (o.TryGetProperty("default", out var d))
+        var hasDefault = o.TryGetProperty("default", out var d);
+        if (hasDefault)
         {
             def = d.ValueKind switch
             {
@@ -137,7 +154,7 @@ public sealed class AtomicCatalogService
             };
         }
 
-        return new AtomicCatalogParamSpec(name, sqlType, required, descVi, descEn, def, example);
+        return new AtomicCatalogParamSpec(name, sqlType, required, descVi, descEn, def, example, hasDefault);
     }
 
     private static bool TryGetArray(JsonElement root, string name, out JsonElement arr)
@@ -174,4 +191,5 @@ public sealed record AtomicCatalogParamSpec(
     string? DescriptionVi,
     string? DescriptionEn,
     object? DefaultValue,
-    string? Example);
+    string? Example,
+    bool HasDefault = false);
