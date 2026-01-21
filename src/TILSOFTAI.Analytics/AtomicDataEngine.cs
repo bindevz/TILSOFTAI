@@ -17,23 +17,31 @@ namespace TILSOFTAI.Analytics;
 /// </summary>
 public sealed class AtomicDataEngine
 {
-    public EngineResult Execute(DataFrame dataset, JsonElement pipeline, EngineBounds bounds)
+    public EngineResult Execute(DataFrame dataset, JsonElement pipeline, EngineBounds bounds, Func<string, DataFrame?> datasetResolver)
     {
         if (dataset is null) throw new ArgumentNullException(nameof(dataset));
         bounds = bounds.WithDefaults();
 
         var plan = AnalysisPipeline.Parse(pipeline);
-        var result = AnalysisExecutor.Execute(dataset, plan, bounds);
-        return new EngineResult(result, plan.Warnings);
+        var warnings = new List<string>(plan.Warnings);
+        var result = AnalysisExecutor.Execute(dataset, plan, bounds, datasetResolver, warnings);
+        return new EngineResult(result, warnings);
     }
 
-    public sealed record EngineBounds(int TopN, int MaxGroups)
+    public EngineResult Execute(DataFrame dataset, JsonElement pipeline, EngineBounds bounds)
+        => Execute(dataset, pipeline, bounds, _ => null);
+
+    public sealed record EngineBounds(int TopN, int MaxGroups, int MaxJoinRows, int MaxJoinMatchesPerLeft, int MaxColumns, int MaxResultRows)
     {
         public EngineBounds WithDefaults()
         {
             var topN = TopN <= 0 ? 20 : Math.Clamp(TopN, 1, 200);
             var maxGroups = MaxGroups <= 0 ? 200 : Math.Clamp(MaxGroups, 1, 5_000);
-            return new EngineBounds(topN, maxGroups);
+            var maxJoinRows = MaxJoinRows <= 0 ? 100_000 : Math.Clamp(MaxJoinRows, 1, 200_000);
+            var maxJoinMatches = MaxJoinMatchesPerLeft <= 0 ? 50 : Math.Clamp(MaxJoinMatchesPerLeft, 1, 5_000);
+            var maxColumns = MaxColumns <= 0 ? 200 : Math.Clamp(MaxColumns, 1, 500);
+            var maxResultRows = MaxResultRows <= 0 ? 500 : Math.Clamp(MaxResultRows, 1, 5_000);
+            return new EngineBounds(topN, maxGroups, maxJoinRows, maxJoinMatches, maxColumns, maxResultRows);
         }
     }
 
@@ -49,11 +57,18 @@ public sealed class AtomicDataEngine
         {
             var steps = new List<Step>();
             var warnings = new List<string>();
+            var stepsElement = pipeline;
+            if (pipeline.ValueKind == JsonValueKind.Object &&
+                pipeline.TryGetProperty("steps", out var stepsProp) &&
+                stepsProp.ValueKind == JsonValueKind.Array)
+            {
+                stepsElement = stepsProp;
+            }
 
-            if (pipeline.ValueKind != JsonValueKind.Array)
-                throw new ArgumentException("pipeline must be a JSON array.");
+            if (stepsElement.ValueKind != JsonValueKind.Array)
+                throw new ArgumentException("pipeline must be a JSON array or { steps: [...] }.");
 
-            foreach (var s in pipeline.EnumerateArray())
+            foreach (var s in stepsElement.EnumerateArray())
             {
                 if (s.ValueKind != JsonValueKind.Object)
                     continue;
@@ -78,6 +93,9 @@ public sealed class AtomicDataEngine
                         break;
                     case "select":
                         steps.Add(SelectStep.Parse(s));
+                        break;
+                    case "join":
+                        steps.Add(JoinStep.Parse(s));
                         break;
                     default:
                         warnings.Add($"Unsupported op '{op}' was ignored.");
@@ -207,9 +225,64 @@ public sealed class AtomicDataEngine
         }
     }
 
+    internal sealed record JoinStep(
+        string RightDatasetId,
+        IReadOnlyList<string> LeftKeys,
+        IReadOnlyList<string> RightKeys,
+        string How,
+        string RightPrefix,
+        IReadOnlyList<string>? SelectRight) : Step("join")
+    {
+        public static JoinStep Parse(JsonElement e)
+        {
+            var rightDatasetId = e.TryGetProperty("rightDatasetId", out var idEl) && idEl.ValueKind == JsonValueKind.String
+                ? idEl.GetString()
+                : null;
+            if (string.IsNullOrWhiteSpace(rightDatasetId))
+                throw new ArgumentException("join.rightDatasetId is required.");
+
+            var leftKeys = ParseStringArray(e, "leftKeys");
+            var rightKeys = ParseStringArray(e, "rightKeys");
+            if (leftKeys.Count == 0 || rightKeys.Count == 0 || leftKeys.Count != rightKeys.Count)
+                throw new ArgumentException("join.leftKeys and join.rightKeys must be non-empty arrays of the same length.");
+
+            var how = e.TryGetProperty("how", out var howEl) && howEl.ValueKind == JsonValueKind.String
+                ? howEl.GetString()
+                : "inner";
+            how = (how ?? "inner").Trim().ToLowerInvariant();
+            if (how is not ("inner" or "left"))
+                throw new ArgumentException("join.how must be 'inner' or 'left'.");
+
+            var rightPrefix = e.TryGetProperty("rightPrefix", out var rpEl) && rpEl.ValueKind == JsonValueKind.String
+                ? rpEl.GetString()
+                : "r_";
+            if (string.IsNullOrWhiteSpace(rightPrefix))
+                rightPrefix = "r_";
+
+            var selectRight = ParseStringArray(e, "selectRight");
+            return new JoinStep(rightDatasetId!.Trim(), leftKeys, rightKeys, how, rightPrefix!, selectRight.Count == 0 ? null : selectRight);
+        }
+
+        private static List<string> ParseStringArray(JsonElement e, string name)
+        {
+            var list = new List<string>();
+            if (e.TryGetProperty(name, out var arr) && arr.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var x in arr.EnumerateArray())
+                {
+                    if (x.ValueKind != JsonValueKind.String) continue;
+                    var s = x.GetString();
+                    if (string.IsNullOrWhiteSpace(s)) continue;
+                    list.Add(s.Trim());
+                }
+            }
+            return list;
+        }
+    }
+
     internal static class AnalysisExecutor
     {
-        public static DataFrame Execute(DataFrame df, AnalysisPipeline pipeline, EngineBounds bounds)
+        public static DataFrame Execute(DataFrame df, AnalysisPipeline pipeline, EngineBounds bounds, Func<string, DataFrame?> datasetResolver, List<string> warnings)
         {
             var current = df;
             foreach (var step in pipeline.Steps)
@@ -231,12 +304,25 @@ public sealed class AtomicDataEngine
                     case TopNStep t:
                         current = ApplyTopN(current, Math.Min(t.N, bounds.TopN));
                         break;
+                    case JoinStep j:
+                        current = ApplyJoin(current, j, bounds, datasetResolver, warnings);
+                        break;
                 }
             }
 
             // Enforce final TopN even if pipeline did not specify.
-            if (current.Rows.Count > bounds.TopN)
-                current = ApplyTopN(current, bounds.TopN);
+            var maxRows = Math.Min(bounds.TopN, bounds.MaxResultRows);
+            if (current.Rows.Count > maxRows)
+            {
+                current = ApplyTopN(current, maxRows);
+                warnings.Add($"Result rows truncated to {maxRows} (maxResultRows).");
+            }
+
+            if (current.Columns.Count > bounds.MaxColumns)
+            {
+                current = ApplyColumnLimit(current, bounds.MaxColumns);
+                warnings.Add($"Result columns truncated to {bounds.MaxColumns} (maxColumns).");
+            }
 
             return current;
         }
@@ -337,6 +423,223 @@ public sealed class AtomicDataEngine
             return outDf;
         }
 
+        private static DataFrame ApplyJoin(
+            DataFrame left,
+            JoinStep step,
+            EngineBounds bounds,
+            Func<string, DataFrame?> datasetResolver,
+            List<string> warnings)
+        {
+            var right = datasetResolver(step.RightDatasetId);
+            if (right is null)
+                throw new ArgumentException($"Join rightDatasetId '{step.RightDatasetId}' not found.");
+
+            var leftKeyIndexes = GetColumnIndexes(left, step.LeftKeys);
+            var rightKeyIndexes = GetColumnIndexes(right, step.RightKeys);
+
+            var rightColumns = ResolveRightColumns(right, step);
+
+            if (left.Columns.Count + rightColumns.Count > bounds.MaxColumns)
+            {
+                var allowed = Math.Max(0, bounds.MaxColumns - left.Columns.Count);
+                if (allowed < rightColumns.Count)
+                {
+                    rightColumns = rightColumns.Take(allowed).ToList();
+                    warnings.Add($"Join columns truncated to {bounds.MaxColumns} (maxColumns).");
+                }
+            }
+
+            var rightIndex = BuildRightIndex(right, rightKeyIndexes);
+
+            var outRows = new List<object?[]>(capacity: Math.Min(bounds.MaxJoinRows, 1024));
+            var truncatedMatches = false;
+            var truncatedRows = false;
+
+            for (long li = 0; li < left.Rows.Count; li++)
+            {
+                var key = BuildCompositeKey(left, leftKeyIndexes, li);
+                if (rightIndex.TryGetValue(key, out var matches))
+                {
+                    var added = 0;
+                    foreach (var ri in matches)
+                    {
+                        if (outRows.Count >= bounds.MaxJoinRows)
+                        {
+                            truncatedRows = true;
+                            break;
+                        }
+
+                        if (added >= bounds.MaxJoinMatchesPerLeft)
+                        {
+                            truncatedMatches = true;
+                            break;
+                        }
+
+                        outRows.Add(BuildJoinRow(left, right, li, ri, rightColumns));
+                        added++;
+                    }
+
+                    if (truncatedRows) break;
+                }
+                else if (string.Equals(step.How, "left", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (outRows.Count >= bounds.MaxJoinRows)
+                    {
+                        truncatedRows = true;
+                        break;
+                    }
+
+                    outRows.Add(BuildLeftJoinRow(left, li, rightColumns.Count));
+                }
+            }
+
+            if (truncatedMatches)
+                warnings.Add($"Join matches truncated to {bounds.MaxJoinMatchesPerLeft} per left row.");
+            if (truncatedRows)
+                warnings.Add($"Join rows truncated to {bounds.MaxJoinRows} rows.");
+
+            return BuildJoinedDataFrame(left, right, outRows, rightColumns, step.RightPrefix);
+        }
+
+        private sealed record JoinColumn(int Index, string Name);
+
+        private static List<JoinColumn> ResolveRightColumns(DataFrame right, JoinStep step)
+        {
+            var rightCols = step.SelectRight is { Count: > 0 }
+                ? step.SelectRight
+                : right.Columns.Select(c => c.Name).ToList();
+
+            var indexes = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (var i = 0; i < right.Columns.Count; i++)
+                indexes[right.Columns[i].Name] = i;
+
+            var list = new List<JoinColumn>();
+            foreach (var name in rightCols)
+            {
+                if (indexes.TryGetValue(name, out var idx))
+                    list.Add(new JoinColumn(idx, name));
+            }
+
+            return list;
+        }
+
+        private static Dictionary<string, List<long>> BuildRightIndex(DataFrame right, int[] keyIndexes)
+        {
+            var index = new Dictionary<string, List<long>>(StringComparer.OrdinalIgnoreCase);
+            for (long i = 0; i < right.Rows.Count; i++)
+            {
+                var key = BuildCompositeKey(right, keyIndexes, i);
+                if (!index.TryGetValue(key, out var list))
+                {
+                    list = new List<long>();
+                    index[key] = list;
+                }
+                list.Add(i);
+            }
+            return index;
+        }
+
+        private static string BuildCompositeKey(DataFrame df, int[] keyIndexes, long rowIndex)
+        {
+            if (keyIndexes.Length == 1)
+            {
+                var v = df.Columns[keyIndexes[0]][rowIndex];
+                return v?.ToString() ?? string.Empty;
+            }
+
+            var parts = new string[keyIndexes.Length];
+            for (var i = 0; i < keyIndexes.Length; i++)
+            {
+                var v = df.Columns[keyIndexes[i]][rowIndex];
+                parts[i] = v?.ToString() ?? string.Empty;
+            }
+
+            return string.Join("\u001F", parts);
+        }
+
+        private static object?[] BuildJoinRow(DataFrame left, DataFrame right, long leftRow, long rightRow, IReadOnlyList<JoinColumn> rightColumns)
+        {
+            var row = new object?[left.Columns.Count + rightColumns.Count];
+            for (var i = 0; i < left.Columns.Count; i++)
+                row[i] = left.Columns[i][leftRow];
+
+            for (var i = 0; i < rightColumns.Count; i++)
+                row[left.Columns.Count + i] = right.Columns[rightColumns[i].Index][rightRow];
+
+            return row;
+        }
+
+        private static object?[] BuildLeftJoinRow(DataFrame left, long leftRow, int rightColumnCount)
+        {
+            var row = new object?[left.Columns.Count + rightColumnCount];
+            for (var i = 0; i < left.Columns.Count; i++)
+                row[i] = left.Columns[i][leftRow];
+            return row;
+        }
+
+        private static DataFrame BuildJoinedDataFrame(
+            DataFrame left,
+            DataFrame right,
+            IReadOnlyList<object?[]> rows,
+            IReadOnlyList<JoinColumn> rightColumns,
+            string rightPrefix)
+        {
+            var rowCount = rows.Count;
+            var cols = new List<DataFrameColumn>(left.Columns.Count + rightColumns.Count);
+
+            foreach (var c in left.Columns)
+                cols.Add(CreateEmptyColumnLike(c, rowCount, c.Name));
+
+            foreach (var c in rightColumns)
+            {
+                var name = rightPrefix + c.Name;
+                cols.Add(CreateEmptyColumnLike(right.Columns[c.Index], rowCount, name));
+            }
+
+            var outDf = new DataFrame(cols);
+            for (var r = 0; r < rows.Count; r++)
+            {
+                var row = rows[r];
+                for (var c = 0; c < cols.Count; c++)
+                {
+                    outDf.Columns[c][r] = row[c];
+                }
+            }
+
+            return outDf;
+        }
+
+        private static int[] GetColumnIndexes(DataFrame df, IReadOnlyList<string> names)
+        {
+            var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (var i = 0; i < df.Columns.Count; i++)
+                map[df.Columns[i].Name] = i;
+
+            var idx = new int[names.Count];
+            for (var i = 0; i < names.Count; i++)
+            {
+                var name = names[i];
+                if (!map.TryGetValue(name, out var index))
+                    throw new ArgumentException($"Join key column '{name}' does not exist.");
+                idx[i] = index;
+            }
+
+            return idx;
+        }
+
+        private static DataFrame ApplyColumnLimit(DataFrame df, int maxColumns)
+        {
+            maxColumns = Math.Clamp(maxColumns, 1, 500);
+            if (df.Columns.Count <= maxColumns)
+                return df;
+
+            var cols = new List<DataFrameColumn>(maxColumns);
+            for (var i = 0; i < maxColumns; i++)
+                cols.Add(df.Columns[i]);
+
+            return new DataFrame(cols);
+        }
+
         private static DataFrame ApplySort(DataFrame df, SortStep step)
         {
             var idx = GetColumnIndex(df, step.By);
@@ -385,15 +688,20 @@ public sealed class AtomicDataEngine
             return outDf;
         }
 
-        private static DataFrameColumn CreateEmptyColumnLike(DataFrameColumn c, long length)
+        private static DataFrameColumn CreateEmptyColumnLike(DataFrameColumn c, long length, string? nameOverride = null)
         {
-            // Keep only types we use in ver23. For unknown types, fall back to string.
+            var name = nameOverride ?? c.Name;
             return c switch
             {
-                Int32DataFrameColumn => new Int32DataFrameColumn(c.Name, length),
-                DoubleDataFrameColumn => new DoubleDataFrameColumn(c.Name, length),
-                StringDataFrameColumn => new StringDataFrameColumn(c.Name, length),
-                _ => new StringDataFrameColumn(c.Name, length)
+                Int32DataFrameColumn => new Int32DataFrameColumn(name, length),
+                Int64DataFrameColumn => new Int64DataFrameColumn(name, length),
+                DoubleDataFrameColumn => new DoubleDataFrameColumn(name, length),
+                SingleDataFrameColumn => new SingleDataFrameColumn(name, length),
+                DecimalDataFrameColumn => new DecimalDataFrameColumn(name, length),
+                BooleanDataFrameColumn => new BooleanDataFrameColumn(name, length),
+                DateTimeDataFrameColumn => new DateTimeDataFrameColumn(name, length),
+                StringDataFrameColumn => new StringDataFrameColumn(name, length),
+                _ => new StringDataFrameColumn(name, length)
             };
         }
 

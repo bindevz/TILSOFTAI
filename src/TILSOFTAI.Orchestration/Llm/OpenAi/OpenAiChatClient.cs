@@ -27,8 +27,7 @@ public sealed class OpenAiChatClient
         if (_http.BaseAddress is null)
             _http.BaseAddress = new Uri(_lm.BaseUrl.TrimEnd('/') + "/v1/");
 
-        if (_http.Timeout == TimeSpan.Zero)
-            _http.Timeout = TimeSpan.FromSeconds(Math.Clamp(_lm.TimeoutSeconds, 5, 300));
+        _http.Timeout = TimeSpan.FromSeconds(Math.Clamp(_lm.TimeoutSeconds, 5, 1800));
 
         // LM Studio accepts any bearer token.
         if (_http.DefaultRequestHeaders.Authorization is null)

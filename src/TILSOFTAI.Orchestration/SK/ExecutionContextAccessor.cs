@@ -15,6 +15,12 @@ public sealed class ExecutionContextAccessor
     public string? LastCollectionFilter { get; set; }
     public string? LastRangeNameFilter { get; set; }
     public string? LastDisplayPreviewJson { get; set; } // compact preview JSON for circuit-breaker fallback
+    public string? LastListPreviewMarkdown { get; set; }
+    public string? LastInsightPreviewMarkdown { get; set; }
+    public string? LastSchemaDigestJson { get; set; }
+    public string? LastEngineDatasetsDigestJson { get; set; }
+    public string? LastListPreviewTitle { get; set; }
+    public string? LastInsightPreviewTitle { get; set; }
 
     // Per-request circuit breaker state for auto tool invocation
     public int AutoInvokeCount { get; set; }

@@ -13,9 +13,24 @@ public sealed class ChatTuningOptions
     public int MaxToolSteps { get; set; } = 8;
 
     /// <summary>
+    /// Estimated max prompt tokens (heuristic).
+    /// </summary>
+    public int MaxPromptTokens { get; set; } = 8000;
+
+    /// <summary>
+    /// Max characters allowed for a compacted tool result.
+    /// </summary>
+    public int MaxToolResultChars { get; set; } = 12000;
+
+    /// <summary>
     /// Default max_tokens for OpenAI-compatible chat completions when the client does not provide one.
     /// </summary>
-    public int MaxTokens { get; set; } = 1200;
+    public int MaxTokens { get; set; } = 800;
+
+    /// <summary>
+    /// Default temperature for chat completions.
+    /// </summary>
+    public double Temperature { get; set; } = 0.2;
 
     /// <summary>
     /// Temperature for tool-calling turns (FunctionChoiceBehavior.Auto).

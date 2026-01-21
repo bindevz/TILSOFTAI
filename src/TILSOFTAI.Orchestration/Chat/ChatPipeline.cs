@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
@@ -7,6 +7,7 @@ using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Orchestration.Chat.Localization;
 using TILSOFTAI.Orchestration.Llm;
 using TILSOFTAI.Orchestration.Llm.OpenAi;
+using TILSOFTAI.Orchestration.Formatting;
 using TILSOFTAI.Orchestration.SK;
 using TILSOFTAI.Orchestration.SK.Conversation;
 
@@ -17,7 +18,7 @@ namespace TILSOFTAI.Orchestration.Chat;
 /// - Call LLM with OpenAI "tools" schema
 /// - Execute tool calls via ToolInvoker
 /// - Append tool results back to the conversation
-/// - Final synthesis pass with tools disabled
+/// - Compose final Markdown response server-side
 /// </summary>
 public sealed class ChatPipeline
 {
@@ -128,6 +129,12 @@ public sealed class ChatPipeline
         _ctxAccessor.LastCollectionFilter = null;
         _ctxAccessor.LastRangeNameFilter = null;
         _ctxAccessor.LastDisplayPreviewJson = null;
+        _ctxAccessor.LastListPreviewMarkdown = null;
+        _ctxAccessor.LastInsightPreviewMarkdown = null;
+        _ctxAccessor.LastSchemaDigestJson = null;
+        _ctxAccessor.LastEngineDatasetsDigestJson = null;
+        _ctxAccessor.LastListPreviewTitle = null;
+        _ctxAccessor.LastInsightPreviewTitle = null;
 
         _logger.LogInformation("ChatPipeline start requestId={RequestId} traceId={TraceId} convId={ConversationId} userId={UserId} lang={Lang} model={Model} msgs={MsgCount}",
             context.RequestId, context.TraceId, context.ConversationId, context.UserId, lang.ToIsoCode(), request.Model, incomingMessages.Count);
@@ -159,18 +166,42 @@ public sealed class ChatPipeline
 
         for (var step = 0; step < maxSteps; step++)
         {
+            TrimMessagesToBudget(messages, _tuning.MaxPromptTokens);
+
             var call = new OpenAiChatCompletionRequest
             {
                 Model = mappedModel,
                 Messages = messages,
                 Tools = tools.ToList(),
                 ToolChoice = "auto",
-                Temperature = request.Temperature ?? _tuning.ToolCallTemperature,
+                Temperature = request.Temperature ?? _tuning.Temperature,
                 MaxTokens = request.MaxTokens ?? _tuning.MaxTokens,
                 Stream = false
             };
 
-            lastResp = await _chat.CreateChatCompletionAsync(call, cancellationToken);
+            try
+            {
+                lastResp = await _chat.CreateChatCompletionAsync(call, cancellationToken);
+            }
+            catch (TaskCanceledException)
+            {
+                var timeoutInsight = lang == ChatLanguage.En
+                    ? "The request timed out (504)."
+                    : "Yeu cau bi qua thoi gian xu ly (504).";
+
+                var timeoutFinal = ComposeFinalMarkdown(timeoutInsight, _ctxAccessor);
+                return MapToApiResponse(lastResp, request.Model ?? "TILSOFT-AI", timeoutFinal, incomingMessages);
+            }
+            catch (TimeoutException)
+            {
+                var timeoutInsight = lang == ChatLanguage.En
+                    ? "The request timed out (504)."
+                    : "Yeu cau bi qua thoi gian xu ly (504).";
+
+                var timeoutFinal = ComposeFinalMarkdown(timeoutInsight, _ctxAccessor);
+                return MapToApiResponse(lastResp, request.Model ?? "TILSOFT-AI", timeoutFinal, incomingMessages);
+            }
+
             var choice = lastResp.Choices.FirstOrDefault();
             if (choice?.Message is null)
                 break;
@@ -178,15 +209,14 @@ public sealed class ChatPipeline
             var assistantMsg = choice.Message;
             messages.Add(assistantMsg);
 
-            // No tool calls -> final answer candidate
+            // No tool calls -> final insight
             if (assistantMsg.ToolCalls is null || assistantMsg.ToolCalls.Count == 0)
             {
-                var final = assistantMsg.Content;
-                if (string.IsNullOrWhiteSpace(final))
-                    final = _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
+                var insight = SanitizeInsightText(assistantMsg.Content);
+                if (string.IsNullOrWhiteSpace(insight))
+                    insight = _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
 
-                // Ensure final output is Markdown 3-block. Run synthesis pass with tools disabled.
-                final = await SynthesizeFinalAsync(mappedModel, messages, lang, cancellationToken);
+                var final = ComposeFinalMarkdown(insight, _ctxAccessor);
 
                 // Audit: AI output (best-effort)
                 try
@@ -214,7 +244,7 @@ public sealed class ChatPipeline
                     _ctxAccessor.CircuitBreakerTripped = true;
                     _ctxAccessor.CircuitBreakerReason = $"Repeated tool call signature: {toolName}";
 
-                    var forced = await SynthesizeFinalAsync(mappedModel, messages, lang, cancellationToken);
+                    var forced = ComposeFinalMarkdown(_localizer.Get(ChatTextKeys.FallbackNoContent, lang), _ctxAccessor);
                     return MapToApiResponse(lastResp, request.Model ?? "TILSOFT-AI", forced, incomingMessages);
                 }
 
@@ -233,20 +263,23 @@ public sealed class ChatPipeline
                 var toolResult = await _toolInvoker.ExecuteAsync(toolName, argsElement, cancellationToken);
                 var toolResultJson = JsonSerializer.Serialize(toolResult, _json);
 
+                TryCaptureToolArtifacts(toolResultJson);
+
+                var compactJson = ToolResultCompactor.CompactEnvelopeJson(toolResultJson, _tuning.MaxToolResultChars);
                 messages.Add(new OpenAiChatMessage
                 {
                     Role = "tool",
                     ToolCallId = tc.Id,
-                    Content = toolResultJson
+                    Content = compactJson
                 });
+
+                TrimMessagesToBudget(messages, _tuning.MaxPromptTokens);
             }
         }
 
-        // Step limit reached -> synthesize anyway.
-        var fallbackFinal = await SynthesizeFinalAsync(mappedModel, messages, lang, cancellationToken);
+        var fallbackFinal = ComposeFinalMarkdown(_localizer.Get(ChatTextKeys.FallbackNoContent, lang), _ctxAccessor);
         return MapToApiResponse(lastResp, request.Model ?? "TILSOFT-AI", fallbackFinal, incomingMessages);
     }
-
     private string BuildSystemPrompt(ChatLanguage lang, ConversationState? state)
     {
         var basePrompt = _localizer.Get(ChatTextKeys.SystemPrompt, lang);
@@ -258,51 +291,308 @@ public sealed class ChatPipeline
             basePrompt += "\n\n" + hint + JsonSerializer.Serialize(state.LastQuery, _json);
         }
 
-        basePrompt += "\n\nOUTPUT FORMAT (Markdown only):\n" +
-                      "- ## Kết luận / Insight\n" +
-                      "- ## Preview dữ liệu của Kết luận / Insight (Markdown table)\n" +
-                      "- ## Preview danh sách (Markdown table, chỉ khi có dữ liệu danh sách)\n";
+        var outputRule = lang == ChatLanguage.En
+            ? "OUTPUT: Return only plain insight text. Do NOT include Markdown headings, tables, lists, or JSON."
+            : "OUTPUT: Chi tra loi phan insight ngan gon. KHONG dung tieu de Markdown, bang, danh sach hoac JSON.";
 
-        basePrompt += "\n\nTool rule: nếu cần chọn stored procedure theo domain/ngữ cảnh, luôn gọi atomic.catalog.search trước, sau đó atomic.query.execute. Nếu cần phân tích sâu (group/pivot/sum/avg/topN), dùng analytics.run với datasetId từ atomic.query.execute.";
+        var toolRule = lang == ChatLanguage.En
+            ? "Tool rule: If you need to choose a stored procedure by domain/context, call atomic.catalog.search first, then atomic.query.execute. If you need deeper analysis (group/pivot/sum/avg/topN), use analytics.run with datasetId from atomic.query.execute."
+            : "Tool rule: Neu can chon stored procedure theo domain/ngu canh, luon goi atomic.catalog.search truoc, sau do atomic.query.execute. Neu can phan tich sau (group/pivot/sum/avg/topN), dung analytics.run voi datasetId tu atomic.query.execute.";
+
+        basePrompt += "\n\n" + outputRule;
+        basePrompt += "\n\n" + toolRule;
 
         return basePrompt;
     }
-
-    private async Task<string> SynthesizeFinalAsync(string mappedModel, List<OpenAiChatMessage> messages, ChatLanguage lang, CancellationToken ct)
+    private static void TrimMessagesToBudget(List<OpenAiChatMessage> messages, int maxPromptTokens)
     {
-        // Build a synthesis request: tools disabled.
-        var instruction = _localizer.Get(ChatTextKeys.SynthesizeNoTools, lang) +
-                         "\n\nBắt buộc output theo đúng 3 mục Markdown như sau:\n" +
-                         "## Kết luận / Insight\n...\n\n## Preview dữ liệu của Kết luận / Insight\n(bảng markdown)\n\n## Preview danh sách\n(nếu có)";
+        if (messages.Count == 0)
+            return;
 
-        // Ensure the synthesis instruction is applied as system prompt for the final call.
-        var synthMessages = new List<OpenAiChatMessage>();
-        var firstSystem = messages.FirstOrDefault(m => m.Role == "system");
-        var system = (firstSystem?.Content ?? string.Empty) + "\n\n" + instruction;
-        synthMessages.Add(new OpenAiChatMessage { Role = "system", Content = system });
-
-        foreach (var m in messages.Skip(1))
-            synthMessages.Add(m);
-
-        var req = new OpenAiChatCompletionRequest
+        var limit = Math.Max(maxPromptTokens, 1000);
+        while (EstimatePromptTokens(messages) > limit && messages.Count > 1)
         {
-            Model = mappedModel,
-            Messages = synthMessages,
-            Tools = null,
-            ToolChoice = null,
-            Temperature = _tuning.SynthesisTemperature,
-            MaxTokens = Math.Clamp(_tuning.MaxTokens, 256, 4000),
-            Stream = false
+            var toolIndex = messages.FindIndex(m => string.Equals(m.Role, "tool", StringComparison.OrdinalIgnoreCase));
+            if (toolIndex > 0)
+            {
+                messages.RemoveAt(toolIndex);
+                continue;
+            }
+
+            var keepFrom = Math.Max(1, messages.Count - 8);
+            if (messages.Count > keepFrom)
+            {
+                messages.RemoveAt(1);
+                continue;
+            }
+
+            if (messages.Count > 1)
+                messages.RemoveAt(1);
+            else
+                break;
+        }
+    }
+
+    private static int EstimatePromptTokens(IEnumerable<OpenAiChatMessage> messages)
+    {
+        var total = 0;
+        foreach (var m in messages)
+        {
+            var len = m.Content?.Length ?? 0;
+            total += len / 4;
+        }
+        return total;
+    }
+    private static string ComposeFinalMarkdown(string insightText, ExecutionContextAccessor ctx)
+    {
+        var emptyNote = "(kh\u00f4ng c\u00f3)";
+        var insight = string.IsNullOrWhiteSpace(insightText) ? emptyNote : insightText.Trim();
+        var insightPreview = string.IsNullOrWhiteSpace(ctx.LastInsightPreviewMarkdown) ? emptyNote : ctx.LastInsightPreviewMarkdown;
+        var listPreview = string.IsNullOrWhiteSpace(ctx.LastListPreviewMarkdown) ? emptyNote : ctx.LastListPreviewMarkdown;
+
+        var sb = new StringBuilder();
+        sb.AppendLine("## K\u1ebft lu\u1eadn / Insight");
+        sb.AppendLine(insight);
+        sb.AppendLine();
+        sb.AppendLine("## Preview d\u1eef li\u1ec7u c\u1ee7a K\u1ebft lu\u1eadn / Insight");
+        if (!string.IsNullOrWhiteSpace(ctx.LastInsightPreviewTitle))
+            sb.AppendLine($"_{ctx.LastInsightPreviewTitle}_");
+        sb.AppendLine(insightPreview);
+        sb.AppendLine();
+        sb.AppendLine("## Preview danh s\u00e1ch");
+        if (!string.IsNullOrWhiteSpace(ctx.LastListPreviewTitle))
+            sb.AppendLine($"_{ctx.LastListPreviewTitle}_");
+        sb.AppendLine(listPreview);
+        return sb.ToString().TrimEnd();
+    }
+
+    private static string SanitizeInsightText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return string.Empty;
+
+        var lines = text.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+        var result = new List<string>();
+        var started = false;
+
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
+            if (trimmed.Length == 0)
+            {
+                if (started) break;
+                continue;
+            }
+
+            if (IsHeadingLine(trimmed) || IsTableLine(trimmed))
+            {
+                if (started) break;
+                continue;
+            }
+
+            result.Add(line.TrimEnd());
+            started = true;
+        }
+
+        return string.Join("\n", result).Trim();
+    }
+
+    private static bool IsHeadingLine(string trimmed)
+        => trimmed.StartsWith("#", StringComparison.Ordinal);
+
+    private static bool IsTableLine(string trimmed)
+    {
+        if (trimmed.StartsWith("|", StringComparison.Ordinal) || trimmed.EndsWith("|", StringComparison.Ordinal))
+            return true;
+        return trimmed.Contains("|", StringComparison.Ordinal) && trimmed.Contains("---", StringComparison.Ordinal);
+    }
+
+    private void TryCaptureToolArtifacts(string envelopeJson)
+    {
+        if (string.IsNullOrWhiteSpace(envelopeJson))
+            return;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(envelopeJson);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("tool", out var toolEl) || !toolEl.TryGetProperty("name", out var nameEl))
+                return;
+
+            var toolName = nameEl.GetString() ?? string.Empty;
+
+            if (string.Equals(toolName, "analytics.run", StringComparison.OrdinalIgnoreCase)
+                && string.IsNullOrWhiteSpace(_ctxAccessor.LastInsightPreviewMarkdown))
+            {
+                if (TryReadEvidenceTable(root, "summary_rows_preview", out var cols, out var rows))
+                {
+                    _ctxAccessor.LastInsightPreviewMarkdown = MarkdownTableRenderer.Render(cols, rows);
+                }
+            }
+
+            if (string.Equals(toolName, "atomic.query.execute", StringComparison.OrdinalIgnoreCase)
+                && string.IsNullOrWhiteSpace(_ctxAccessor.LastListPreviewMarkdown))
+            {
+                if (TryReadDisplayTable(root, out var cols, out var rows, out var title))
+                {
+                    _ctxAccessor.LastListPreviewTitle = title;
+                    _ctxAccessor.LastListPreviewMarkdown = MarkdownTableRenderer.Render(cols, rows);
+                }
+            }
+        }
+        catch
+        {
+            // best-effort only
+        }
+    }
+
+    private static bool TryReadEvidenceTable(JsonElement root, string evidenceId, out List<string> columns, out List<object?[]> rows)
+    {
+        columns = new List<string>();
+        rows = new List<object?[]>();
+
+        if (!root.TryGetProperty("evidence", out var evidenceEl) || evidenceEl.ValueKind != JsonValueKind.Array)
+            return false;
+
+        foreach (var item in evidenceEl.EnumerateArray())
+        {
+            if (!item.TryGetProperty("id", out var idEl) || idEl.ValueKind != JsonValueKind.String)
+                continue;
+            if (!string.Equals(idEl.GetString(), evidenceId, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (!item.TryGetProperty("payload", out var payloadEl) || payloadEl.ValueKind != JsonValueKind.Object)
+                continue;
+
+            return TryReadTablePayload(payloadEl, out columns, out rows);
+        }
+
+        return false;
+    }
+
+    private static bool TryReadDisplayTable(JsonElement root, out List<string> columns, out List<object?[]> rows, out string? title)
+    {
+        columns = new List<string>();
+        rows = new List<object?[]>();
+        title = null;
+
+        if (!root.TryGetProperty("data", out var dataEl) || dataEl.ValueKind != JsonValueKind.Object)
+            return false;
+
+        if (!dataEl.TryGetProperty("displayTables", out var tablesEl) || tablesEl.ValueKind != JsonValueKind.Array)
+            return false;
+
+        foreach (var tableEl in tablesEl.EnumerateArray())
+        {
+            if (tableEl.ValueKind != JsonValueKind.Object)
+                continue;
+
+            if (tableEl.TryGetProperty("tableName", out var nameEl) && nameEl.ValueKind == JsonValueKind.String)
+                title = nameEl.GetString();
+
+            if (!tableEl.TryGetProperty("table", out var tabularEl) || tabularEl.ValueKind != JsonValueKind.Object)
+                continue;
+
+            return TryReadTabularData(tabularEl, out columns, out rows);
+        }
+
+        return false;
+    }
+
+    private static bool TryReadTablePayload(JsonElement payload, out List<string> columns, out List<object?[]> rows)
+    {
+        columns = new List<string>();
+        rows = new List<object?[]>();
+
+        if (payload.TryGetProperty("columns", out var columnsEl) && columnsEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var col in columnsEl.EnumerateArray())
+            {
+                if (col.ValueKind == JsonValueKind.String)
+                    columns.Add(col.GetString() ?? string.Empty);
+            }
+        }
+
+        if (payload.TryGetProperty("rows", out var rowsEl) && rowsEl.ValueKind == JsonValueKind.Array)
+        {
+            var maxRows = 50;
+            foreach (var rowEl in rowsEl.EnumerateArray().Take(maxRows))
+            {
+                if (rowEl.ValueKind != JsonValueKind.Array)
+                    continue;
+                rows.Add(ReadRow(rowEl, columns.Count));
+            }
+        }
+
+        if (columns.Count == 0 && rows.Count > 0)
+        {
+            for (var i = 0; i < rows[0].Length; i++)
+                columns.Add($"col{i + 1}");
+        }
+
+        return columns.Count > 0;
+    }
+
+    private static bool TryReadTabularData(JsonElement tabularEl, out List<string> columns, out List<object?[]> rows)
+    {
+        columns = new List<string>();
+        rows = new List<object?[]>();
+
+        if (tabularEl.TryGetProperty("columns", out var colsEl) && colsEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var colEl in colsEl.EnumerateArray())
+            {
+                if (colEl.ValueKind == JsonValueKind.Object && colEl.TryGetProperty("name", out var nameEl) && nameEl.ValueKind == JsonValueKind.String)
+                    columns.Add(nameEl.GetString() ?? string.Empty);
+                else if (colEl.ValueKind == JsonValueKind.String)
+                    columns.Add(colEl.GetString() ?? string.Empty);
+            }
+        }
+
+        if (tabularEl.TryGetProperty("rows", out var rowsEl) && rowsEl.ValueKind == JsonValueKind.Array)
+        {
+            var maxRows = 50;
+            foreach (var rowEl in rowsEl.EnumerateArray().Take(maxRows))
+            {
+                if (rowEl.ValueKind != JsonValueKind.Array)
+                    continue;
+                rows.Add(ReadRow(rowEl, columns.Count));
+            }
+        }
+
+        if (columns.Count == 0 && rows.Count > 0)
+        {
+            for (var i = 0; i < rows[0].Length; i++)
+                columns.Add($"col{i + 1}");
+        }
+
+        return columns.Count > 0;
+    }
+
+    private static object?[] ReadRow(JsonElement rowEl, int maxCols)
+    {
+        var cols = maxCols > 0 ? maxCols : rowEl.GetArrayLength();
+        var row = new object?[cols];
+        var index = 0;
+        foreach (var cell in rowEl.EnumerateArray())
+        {
+            if (index >= cols)
+                break;
+            row[index++] = ReadCell(cell);
+        }
+        return row;
+    }
+
+    private static object? ReadCell(JsonElement cell)
+    {
+        return cell.ValueKind switch
+        {
+            JsonValueKind.String => cell.GetString(),
+            JsonValueKind.Number => cell.TryGetInt64(out var l) ? l : cell.TryGetDouble(out var d) ? d : cell.GetRawText(),
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.Null => null,
+            _ => cell.GetRawText()
         };
-
-        var resp = await _chat.CreateChatCompletionAsync(req, ct);
-        var msg = resp.Choices.FirstOrDefault()?.Message;
-        var content = msg?.Content;
-
-        if (string.IsNullOrWhiteSpace(content))
-            content = _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
-
-        return content;
     }
 
     private static string ComputeSignature(string toolName, string argsJson)
@@ -362,3 +652,7 @@ public sealed class ChatPipeline
         };
     }
 }
+
+
+
+

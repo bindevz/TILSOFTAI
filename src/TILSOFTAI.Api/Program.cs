@@ -89,7 +89,7 @@ builder.Services.AddHttpClient<OpenAiChatClient>((sp, http) =>
 {
     var lm = sp.GetRequiredService<LmStudioOptions>();
     http.BaseAddress = new Uri(lm.BaseUrl.TrimEnd('/') + "/v1/");
-    http.Timeout = TimeSpan.FromSeconds(Math.Clamp(lm.TimeoutSeconds, 5, 300));
+    http.Timeout = TimeSpan.FromSeconds(Math.Clamp(lm.TimeoutSeconds, 5, 1800));
     http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "lm-studio");
 });
 

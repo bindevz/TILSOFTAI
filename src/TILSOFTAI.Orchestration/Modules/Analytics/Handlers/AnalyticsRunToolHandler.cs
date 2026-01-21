@@ -1,5 +1,9 @@
+using System.Text.Json;
 using TILSOFTAI.Application.Services;
 using TILSOFTAI.Domain.ValueObjects;
+using TILSOFTAI.Orchestration.Contracts;
+using TILSOFTAI.Orchestration.Formatting;
+using TILSOFTAI.Orchestration.SK;
 using TILSOFTAI.Orchestration.Tools;
 using TILSOFTAI.Orchestration.Tools.Modularity;
 
@@ -10,10 +14,12 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
     public string ToolName => "analytics.run";
 
     private readonly AnalyticsService _analyticsService;
+    private readonly ExecutionContextAccessor _ctxAccessor;
 
-    public AnalyticsRunToolHandler(AnalyticsService analyticsService)
+    public AnalyticsRunToolHandler(AnalyticsService analyticsService, ExecutionContextAccessor ctxAccessor)
     {
         _analyticsService = analyticsService;
+        _ctxAccessor = ctxAccessor;
     }
 
     public async Task<ToolDispatchResult> HandleAsync(object intent, TSExecutionContext context, CancellationToken cancellationToken)
@@ -27,7 +33,29 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
             MaxGroups: dyn.GetInt("maxGroups", 200),
             MaxResultRows: dyn.GetInt("maxResultRows", 500));
 
-        var result = await _analyticsService.RunAsync(datasetId, pipeline, bounds, context, cancellationToken);
+        if (!_analyticsService.TryGetDatasetSchema(datasetId, context, out var baseSchema, out var schemaError))
+        {
+            var errorPayload = BuildFailurePayload(datasetId, "dataset_not_found", schemaError ?? "Dataset not found or expired.");
+            return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateFailure("analytics.run failed", errorPayload));
+        }
+
+        var validationErrors = ValidatePipeline(pipeline, baseSchema, context);
+        if (validationErrors.Count > 0)
+        {
+            var errorPayload = BuildFailurePayload(datasetId, "invalid_pipeline", "Pipeline validation failed.", validationErrors);
+            return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateFailure("analytics.run invalid pipeline", errorPayload));
+        }
+
+        AnalyticsService.RunResult result;
+        try
+        {
+            result = await _analyticsService.RunAsync(datasetId, pipeline, bounds, context, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            var errorPayload = BuildFailurePayload(datasetId, "execution_failed", ex.Message);
+            return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateFailure("analytics.run failed", errorPayload));
+        }
 
         var payload = new
         {
@@ -40,16 +68,393 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
                 result.DatasetId,
                 result.RowCount,
                 result.ColumnCount,
-                schema = result.Schema,
-                rows = new
-                {
-                    columns = result.Schema.Select(c => c.Name),
-                    values = result.Rows
-                },
                 warnings = result.Warnings
             }
         };
 
-        return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateSuccess("analytics.run executed", payload));
+        _ctxAccessor.LastInsightPreviewMarkdown = MarkdownTableRenderer.Render(new AnalyticsSchema(result.Schema), result.Rows);
+
+        var previewRows = result.Rows.Take(50).ToArray();
+        var evidence = new List<EnvelopeEvidenceItemV1>
+        {
+            new EnvelopeEvidenceItemV1
+            {
+                Id = "summary_schema",
+                Type = "metric",
+                Title = "Summary schema",
+                Payload = new
+                {
+                    columns = result.Schema.Select(c => new { name = c.Name, dataType = c.DataType, displayName = c.DisplayName })
+                }
+            },
+            new EnvelopeEvidenceItemV1
+            {
+                Id = "summary_rows_preview",
+                Type = "list",
+                Title = "Summary rows preview",
+                Payload = new
+                {
+                    columns = result.Schema.Select(c => c.Name),
+                    rows = previewRows
+                }
+            }
+        };
+
+        var extras = new ToolDispatchExtras(
+            Source: new EnvelopeSourceV1 { System = "analytics", Name = "atomic-data-engine", Cache = "na" },
+            Evidence: evidence);
+
+        return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateSuccess("analytics.run executed", payload), extras);
+    }
+
+    private IReadOnlyList<string> ValidatePipeline(JsonElement pipeline, IReadOnlyList<AnalyticsService.AnalyticsColumn> baseSchema, TSExecutionContext context)
+    {
+        var errors = new List<string>();
+        var steps = TryEnumerateSteps(pipeline, out var parseError);
+        if (steps is null)
+        {
+            errors.Add(parseError ?? "pipeline must be an array or { steps: [...] }.");
+            return errors;
+        }
+
+        var columns = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var c in baseSchema)
+        {
+            if (!string.IsNullOrWhiteSpace(c.Name))
+                columns[c.Name] = c.DataType;
+        }
+
+        var allowedOps = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "filter", "groupby", "sort", "topn", "select", "join"
+        };
+
+        foreach (var step in steps)
+        {
+            if (step.ValueKind != JsonValueKind.Object)
+                continue;
+
+            if (!step.TryGetProperty("op", out var opEl) || opEl.ValueKind != JsonValueKind.String)
+            {
+                errors.Add("pipeline step is missing 'op'.");
+                continue;
+            }
+
+            var op = (opEl.GetString() ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(op))
+            {
+                errors.Add("pipeline step has empty 'op'.");
+                continue;
+            }
+
+            var opNorm = op.Trim().ToLowerInvariant();
+            if (!allowedOps.Contains(opNorm))
+            {
+                errors.Add($"Unsupported op '{op}'. Allowed: {string.Join(", ", allowedOps)}.");
+                continue;
+            }
+
+            switch (opNorm)
+            {
+                case "filter":
+                    ValidateFilter(step, columns, errors);
+                    break;
+                case "groupby":
+                    columns = ValidateGroupBy(step, columns, errors);
+                    break;
+                case "sort":
+                    ValidateSort(step, columns, errors);
+                    break;
+                case "topn":
+                    break;
+                case "select":
+                    columns = ValidateSelect(step, columns, errors);
+                    break;
+                case "join":
+                    columns = ValidateJoin(step, columns, context, errors);
+                    break;
+            }
+        }
+
+        return errors;
+    }
+
+    private static IEnumerable<JsonElement>? TryEnumerateSteps(JsonElement pipeline, out string? error)
+    {
+        error = null;
+        if (pipeline.ValueKind == JsonValueKind.Array)
+            return pipeline.EnumerateArray();
+
+        if (pipeline.ValueKind == JsonValueKind.Object &&
+            pipeline.TryGetProperty("steps", out var stepsEl) &&
+            stepsEl.ValueKind == JsonValueKind.Array)
+        {
+            return stepsEl.EnumerateArray();
+        }
+
+        error = "pipeline must be an array or { steps: [...] }.";
+        return null;
+    }
+
+    private static void ValidateFilter(JsonElement step, Dictionary<string, string> columns, List<string> errors)
+    {
+        if (!step.TryGetProperty("column", out var colEl) || colEl.ValueKind != JsonValueKind.String)
+        {
+            errors.Add("filter.column is required.");
+            return;
+        }
+
+        var col = colEl.GetString() ?? string.Empty;
+        if (!columns.ContainsKey(col))
+            errors.Add($"filter.column '{col}' does not exist.");
+    }
+
+    private static Dictionary<string, string> ValidateGroupBy(JsonElement step, Dictionary<string, string> columns, List<string> errors)
+    {
+        var by = new List<string>();
+        if (step.TryGetProperty("by", out var byEl) && byEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var b in byEl.EnumerateArray())
+            {
+                if (b.ValueKind != JsonValueKind.String) continue;
+                var name = b.GetString();
+                if (!string.IsNullOrWhiteSpace(name))
+                    by.Add(name.Trim());
+            }
+        }
+
+        if (by.Count == 0)
+        {
+            errors.Add("groupBy.by must be a non-empty array.");
+            return columns;
+        }
+
+        foreach (var k in by)
+        {
+            if (!columns.ContainsKey(k))
+                errors.Add($"groupBy.by contains unknown column '{k}'.");
+        }
+
+        var aggs = new List<(string op, string? column, string asName)>();
+        if (step.TryGetProperty("aggregates", out var agEl) && agEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var a in agEl.EnumerateArray())
+            {
+                if (a.ValueKind != JsonValueKind.Object) continue;
+                var op = a.TryGetProperty("op", out var opEl) && opEl.ValueKind == JsonValueKind.String ? opEl.GetString() : null;
+                var col = a.TryGetProperty("column", out var colEl) && colEl.ValueKind == JsonValueKind.String ? colEl.GetString() : null;
+                var asName = a.TryGetProperty("as", out var asEl) && asEl.ValueKind == JsonValueKind.String ? asEl.GetString() : null;
+                if (string.IsNullOrWhiteSpace(op)) continue;
+                var opNorm = op!.Trim().ToLowerInvariant();
+                var name = string.IsNullOrWhiteSpace(asName)
+                    ? (opNorm == "count" ? "count" : $"{opNorm}_{col}")
+                    : asName!.Trim();
+                aggs.Add((opNorm, string.IsNullOrWhiteSpace(col) ? null : col!.Trim(), name));
+            }
+        }
+
+        if (aggs.Count == 0)
+            aggs.Add(("count", null, "count"));
+
+        foreach (var agg in aggs)
+        {
+            if (agg.op == "count")
+                continue;
+
+            if (string.IsNullOrWhiteSpace(agg.column))
+            {
+                errors.Add($"aggregate '{agg.op}' requires 'column'.");
+                continue;
+            }
+
+            if (!columns.TryGetValue(agg.column!, out var typeName))
+            {
+                errors.Add($"aggregate column '{agg.column}' does not exist.");
+                continue;
+            }
+
+            if ((agg.op == "sum" || agg.op == "avg") && !IsNumericType(typeName))
+                errors.Add($"aggregate '{agg.op}' requires numeric column '{agg.column}'.");
+        }
+
+        var next = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var k in by)
+            if (columns.TryGetValue(k, out var t)) next[k] = t;
+
+        foreach (var agg in aggs)
+            next[agg.asName] = "Double";
+
+        return next;
+    }
+
+    private static void ValidateSort(JsonElement step, Dictionary<string, string> columns, List<string> errors)
+    {
+        if (!step.TryGetProperty("by", out var byEl) || byEl.ValueKind != JsonValueKind.String)
+        {
+            errors.Add("sort.by is required.");
+            return;
+        }
+
+        var by = byEl.GetString() ?? string.Empty;
+        if (!columns.ContainsKey(by))
+            errors.Add($"sort.by '{by}' does not exist.");
+    }
+
+    private static Dictionary<string, string> ValidateSelect(JsonElement step, Dictionary<string, string> columns, List<string> errors)
+    {
+        var selected = new List<string>();
+        if (step.TryGetProperty("columns", out var colsEl) && colsEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var c in colsEl.EnumerateArray())
+            {
+                if (c.ValueKind != JsonValueKind.String) continue;
+                var name = c.GetString();
+                if (!string.IsNullOrWhiteSpace(name))
+                    selected.Add(name.Trim());
+            }
+        }
+
+        if (selected.Count == 0)
+        {
+            errors.Add("select.columns must be a non-empty array.");
+            return columns;
+        }
+
+        var next = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in selected)
+        {
+            if (!columns.TryGetValue(name, out var typeName))
+            {
+                errors.Add($"select.columns contains unknown column '{name}'.");
+                continue;
+            }
+            next[name] = typeName;
+        }
+
+        return next;
+    }
+
+    private Dictionary<string, string> ValidateJoin(JsonElement step, Dictionary<string, string> columns, TSExecutionContext context, List<string> errors)
+    {
+        if (!step.TryGetProperty("rightDatasetId", out var dsEl) || dsEl.ValueKind != JsonValueKind.String)
+        {
+            errors.Add("join.rightDatasetId is required.");
+            return columns;
+        }
+
+        var rightDatasetId = dsEl.GetString() ?? string.Empty;
+        if (!_analyticsService.TryGetDatasetSchema(rightDatasetId, context, out var rightSchema, out var schemaError))
+        {
+            errors.Add(schemaError ?? $"join.rightDatasetId '{rightDatasetId}' not found.");
+            return columns;
+        }
+
+        var leftKeys = ReadStringArray(step, "leftKeys");
+        var rightKeys = ReadStringArray(step, "rightKeys");
+        if (leftKeys.Count == 0 || rightKeys.Count == 0 || leftKeys.Count != rightKeys.Count)
+            errors.Add("join.leftKeys and join.rightKeys must be non-empty arrays of the same length.");
+
+        foreach (var key in leftKeys)
+        {
+            if (!columns.ContainsKey(key))
+                errors.Add($"join.leftKeys contains unknown column '{key}'.");
+        }
+
+        var rightColumns = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var c in rightSchema)
+            rightColumns[c.Name] = c.DataType;
+
+        foreach (var key in rightKeys)
+        {
+            if (!rightColumns.ContainsKey(key))
+                errors.Add($"join.rightKeys contains unknown column '{key}'.");
+        }
+
+        var how = step.TryGetProperty("how", out var howEl) && howEl.ValueKind == JsonValueKind.String ? howEl.GetString() : "inner";
+        if (!string.Equals(how, "inner", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(how, "left", StringComparison.OrdinalIgnoreCase))
+        {
+            errors.Add($"join.how '{how}' is invalid. Use 'inner' or 'left'.");
+        }
+
+        var rightPrefix = step.TryGetProperty("rightPrefix", out var prefixEl) && prefixEl.ValueKind == JsonValueKind.String
+            ? prefixEl.GetString()
+            : "r_";
+        if (string.IsNullOrWhiteSpace(rightPrefix))
+            rightPrefix = "r_";
+
+        var selectRight = ReadStringArray(step, "selectRight");
+        var rightToInclude = selectRight.Count > 0 ? selectRight : rightColumns.Keys.ToList();
+
+        foreach (var col in rightToInclude)
+        {
+            if (!rightColumns.ContainsKey(col))
+            {
+                errors.Add($"join.selectRight contains unknown column '{col}'.");
+                continue;
+            }
+
+            var prefixed = rightPrefix + col;
+            if (columns.ContainsKey(prefixed))
+            {
+                errors.Add($"join output column '{prefixed}' already exists.");
+                continue;
+            }
+
+            columns[prefixed] = rightColumns[col];
+        }
+
+        return columns;
+    }
+
+    private static List<string> ReadStringArray(JsonElement step, string propName)
+    {
+        var values = new List<string>();
+        if (!step.TryGetProperty(propName, out var el) || el.ValueKind != JsonValueKind.Array)
+            return values;
+
+        foreach (var v in el.EnumerateArray())
+        {
+            if (v.ValueKind != JsonValueKind.String) continue;
+            var s = v.GetString();
+            if (!string.IsNullOrWhiteSpace(s))
+                values.Add(s.Trim());
+        }
+
+        return values;
+    }
+
+    private static bool IsNumericType(string? typeName)
+    {
+        if (string.IsNullOrWhiteSpace(typeName))
+            return false;
+
+        return typeName.Equals("Int32", StringComparison.OrdinalIgnoreCase)
+            || typeName.Equals("Int64", StringComparison.OrdinalIgnoreCase)
+            || typeName.Equals("Double", StringComparison.OrdinalIgnoreCase)
+            || typeName.Equals("Decimal", StringComparison.OrdinalIgnoreCase)
+            || typeName.Equals("Single", StringComparison.OrdinalIgnoreCase)
+            || typeName.Equals("Float", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static object BuildFailurePayload(string datasetId, string code, string message, IReadOnlyList<string>? errors = null)
+    {
+        return new
+        {
+            kind = "analytics.run.v1",
+            schemaVersion = 1,
+            generatedAtUtc = DateTimeOffset.UtcNow,
+            resource = "analytics.run",
+            data = new
+            {
+                datasetId,
+                error = new
+                {
+                    code,
+                    message
+                },
+                details = errors is null || errors.Count == 0 ? null : errors.ToArray()
+            }
+        };
     }
 }

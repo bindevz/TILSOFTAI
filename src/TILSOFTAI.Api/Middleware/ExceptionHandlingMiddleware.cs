@@ -49,6 +49,11 @@ public sealed class ExceptionHandlingMiddleware
     {
         switch (ex)
         {
+            case TaskCanceledException:
+            case TimeoutException:
+                return (StatusCodes.Status504GatewayTimeout, "Gateway timeout.");
+            case HttpRequestException:
+                return (StatusCodes.Status502BadGateway, "Bad gateway.");
             case ArgumentException:
             case InvalidOperationException:
             case KeyNotFoundException:

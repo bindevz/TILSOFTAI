@@ -1,7 +1,8 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using TILSOFTAI.Application.Services;
 using TILSOFTAI.Domain.ValueObjects;
+using TILSOFTAI.Orchestration.Formatting;
 using TILSOFTAI.Orchestration.SK;
 using TILSOFTAI.Orchestration.Contracts;
 using TILSOFTAI.Orchestration.Tools;
@@ -30,6 +31,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
     private readonly AtomicCatalogService _catalog;
     private readonly ExecutionContextAccessor _ctxAccessor;
     private readonly ILogger<AtomicQueryExecuteToolHandler> _logger;
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     public AtomicQueryExecuteToolHandler(
         AtomicQueryService atomicQueryService,
@@ -177,22 +179,47 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         var displayTables = new List<object>();
         var engineDatasets = new List<object>();
         var warnings = new List<string>();
-
+        var schemaDigestTables = new List<object>();
+        var engineDatasetDigests = new List<object>();
+        TabularData? listPreviewTable = null;
+        string? listPreviewTitle = null;
         foreach (var t in atomic.Tables)
         {
             var trimmedTable = TrimColumns(t.Table, maxColumns);
             var stats = TableStats.From(trimmedTable);
             var decision = DecideDelivery(t.Schema, stats, routing);
 
-            
+            var digestColumns = BuildColumnDigests(t.Schema, trimmedTable, Math.Min(maxColumns, 60));
+            var primaryKey = t.Schema.PrimaryKey ?? Array.Empty<string>();
+            var joinHints = ResolveJoinHints(t.Schema, trimmedTable);
+            var foreignKeys = BuildForeignKeys(joinHints, primaryKey);
+
+            schemaDigestTables.Add(new
+            {
+                name = t.Schema.TableName,
+                kind = decision.Engine && decision.Display ? "both" : decision.Engine ? "engine" : "display",
+                rowCountEstimate = trimmedTable.TotalCount ?? trimmedTable.Rows.Count,
+                primaryKey,
+                foreignKeys,
+                joinHints,
+                columns = digestColumns
+            });
+
             if (decision.Display)
             {
-                var displayTable = TrimRows(trimmedTable, routing.MaxDisplayRows);
+                if (listPreviewTable is null && trimmedTable.Rows.Count > 0)
+                {
+                    listPreviewTable = trimmedTable;
+                    listPreviewTitle = t.Schema.TableName;
+                }
+
                 var displayTrunc = new
                 {
-                    rows = new { returned = displayTable.Rows.Count, max = routing.MaxDisplayRows, original = trimmedTable.Rows.Count },
-                    columns = new { returned = displayTable.Columns.Count, max = maxColumns, original = t.Table.Columns.Count }
+                    rows = new { returned = Math.Min(trimmedTable.Rows.Count, routing.MaxDisplayRows), max = routing.MaxDisplayRows, original = trimmedTable.Rows.Count },
+                    columns = new { returned = trimmedTable.Columns.Count, max = maxColumns, original = t.Table.Columns.Count }
                 };
+
+                var displayPayload = new TabularData(trimmedTable.Columns, Array.Empty<object?[]>(), trimmedTable.TotalCount);
 
                 displayTables.Add(new
                 {
@@ -201,18 +228,20 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
                     tableKind = t.Schema.TableKind,
                     delivery = t.Schema.Delivery ?? "auto",
                     grain = t.Schema.Grain,
-                    primaryKey = t.Schema.PrimaryKey,
-                    joinHints = t.Schema.JoinHints,
+                    primaryKey,
+                    joinHints,
                     description_vi = t.Schema.DescriptionVi,
                     description_en = t.Schema.DescriptionEn,
                     schema = t.Schema,
                     routingReason = decision.Reason,
                     truncation = displayTrunc,
-                    table = displayTable
+                    table = displayPayload,
+                    rowsReturned = trimmedTable.Rows.Count,
+                    columnCount = trimmedTable.Columns.Count
                 });
 
-                if (displayTable.Rows.Count < trimmedTable.Rows.Count)
-                    warnings.Add($"Display table '{t.Schema.TableName}' was truncated to {displayTable.Rows.Count} rows (maxDisplayRows={routing.MaxDisplayRows}). Use engineDatasets + analytics.run for full analysis.");
+                if (trimmedTable.Rows.Count > routing.MaxDisplayRows)
+                    warnings.Add($"Display table '{t.Schema.TableName}' was truncated to {routing.MaxDisplayRows} rows (maxDisplayRows={routing.MaxDisplayRows}). Use engineDatasets + analytics.run for full analysis.");
             }
 
             if (decision.Engine)
@@ -231,12 +260,22 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
                         MaxColumns: maxColumns,
                         PreviewRows: previewRows);
 
+                    Func<string, object?> digestFactory = datasetId => BuildEngineDatasetDigest(
+                        datasetId,
+                        t.Schema.TableName,
+                        digestColumns,
+                        primaryKey,
+                        joinHints);
+
                     var dataset = await _analyticsService.CreateDatasetFromTabularAsync(
                         source: "atomic",
                         tabular: trimmedTable,
                         bounds: bounds,
                         context: context,
-                        cancellationToken: cancellationToken);
+                        cancellationToken: cancellationToken,
+                        schemaDigestFactory: digestFactory);
+
+                    engineDatasetDigests.Add(digestFactory(dataset.DatasetId));
 
                     engineDatasets.Add(new
                     {
@@ -252,7 +291,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
                         preview = new
                         {
                             columns = dataset.Schema.Select(c => c.Name),
-                            rows = dataset.Preview
+                            rows = Array.Empty<object?[]>()
                         }
                     });
                 }
@@ -266,6 +305,25 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         // Protect against accidental token bloat.
         if (displayTables.Count > 0)
             warnings.Add("Display tables are bounded. For large analysis prefer engineDatasets + analytics.run.");
+
+        if (listPreviewTable is not null)
+        {
+            _ctxAccessor.LastListPreviewTitle = listPreviewTitle;
+            _ctxAccessor.LastListPreviewMarkdown = MarkdownTableRenderer.Render(listPreviewTable);
+        }
+
+        var schemaDigest = new
+        {
+            tables = schemaDigestTables
+        };
+
+        var engineDatasetsDigest = new
+        {
+            datasets = engineDatasetDigests
+        };
+
+        _ctxAccessor.LastSchemaDigestJson = JsonSerializer.Serialize(schemaDigest, Json);
+        _ctxAccessor.LastEngineDatasetsDigestJson = JsonSerializer.Serialize(engineDatasetsDigest, Json);
 
         var payload = new
         {
@@ -292,7 +350,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         };
 
         // Evidence: provide a compact, stable slice so the client can always render an answer.
-        var evidence = BuildEvidenceFromAtomicResult(spName, atomic, displayTables.Count, engineDatasets.Count);
+        var evidence = BuildEvidenceFromAtomicResult(spName, atomic, displayTables.Count, engineDatasets.Count, schemaDigest, engineDatasetsDigest);
 
         // Cache key answer hints for deterministic fallback when circuit breaker trips.
         CacheAnswerHints(spName, atomic);
@@ -401,7 +459,9 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
         string spName,
         AtomicQueryResult atomic,
         int displayTableCount,
-        int engineDatasetCount)
+        int engineDatasetCount,
+        object schemaDigest,
+        object engineDatasetsDigest)
     {
         var list = new List<EnvelopeEvidenceItemV1>();
 
@@ -422,7 +482,7 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
                     filters
                 }
             });
-        };
+        }
 
         // 2) Always return a minimal execution snapshot.
         list.Add(new EnvelopeEvidenceItemV1
@@ -442,39 +502,171 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
                 }
             }
         });
-        // 3) Provide a small, answerable display preview so the assistant can respond without re-calling tools.
-        var displayPreview = TryBuildDisplayPreviewPayload(atomic, maxRows: 12, maxCols: 12);
-        if (displayPreview is not null)
+
+        list.Add(new EnvelopeEvidenceItemV1
         {
-            list.Add(new EnvelopeEvidenceItemV1
+            Id = "schema_digest",
+            Type = "entity",
+            Title = "Schema digest",
+            Payload = schemaDigest
+        });
+
+        list.Add(new EnvelopeEvidenceItemV1
+        {
+            Id = "engine_datasets",
+            Type = "list",
+            Title = "Engine datasets",
+            Payload = engineDatasetsDigest
+        });
+
+        return list;
+    }
+
+    private static IReadOnlyList<object> BuildColumnDigests(AtomicResultSetSchema schema, TabularData table, int maxColumns)
+    {
+        maxColumns = Math.Clamp(maxColumns, 1, 200);
+        var list = new List<object>(maxColumns);
+
+        if (schema.Columns is not null && schema.Columns.Count > 0)
+        {
+            foreach (var c in schema.Columns.Take(maxColumns))
             {
-                Id = "display_preview",
-                Type = "list",
-                Title = "Display preview",
-                Payload = displayPreview
-            });
+                list.Add(new
+                {
+                    name = c.Name,
+                    sqlType = c.SqlType,
+                    tabularType = c.TabularType,
+                    semanticType = c.SemanticType,
+                    role = c.Role,
+                    nullable = c.Nullable
+                });
+            }
+            return list;
         }
 
-        // 3) If summary is missing but we have at least one table, expose a small preview hint.
-        if (atomic.Summary is null && atomic.Tables.Count > 0)
+        foreach (var c in table.Columns.Take(maxColumns))
         {
-            var first = atomic.Tables[0];
-            list.Add(new EnvelopeEvidenceItemV1
+            list.Add(new
             {
-                Id = "preview_hint",
-                Type = "list",
-                Title = "Preview hint",
-                Payload = new
-                {
-                    tableName = first.Schema.TableName,
-                    columns = first.Table.Columns.Select(c => c.Name).Take(20),
-                    rowsReturned = first.Table.Rows.Count,
-                    note = "Summary RS1 was not present; use displayTables/engineDatasets in payload.data for details."
-                }
+                name = c.Name,
+                sqlType = (string?)null,
+                tabularType = c.Type.ToString(),
+                semanticType = (string?)null,
+                role = (string?)null,
+                nullable = (bool?)null
             });
         }
 
         return list;
+    }
+
+    private static IReadOnlyList<string> ResolveJoinHints(AtomicResultSetSchema schema, TabularData table)
+    {
+        if (!string.IsNullOrWhiteSpace(schema.JoinHints))
+            return ParseJoinHints(schema.JoinHints);
+
+        var names = schema.Columns is not null && schema.Columns.Count > 0
+            ? schema.Columns.Select(c => c.Name)
+            : table.Columns.Select(c => c.Name);
+
+        return InferJoinKeys(names, schema.TableName);
+    }
+
+    private static IReadOnlyList<string> BuildForeignKeys(IReadOnlyList<string> joinHints, IReadOnlyList<string> primaryKey)
+    {
+        var pk = new HashSet<string>(primaryKey ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
+        return joinHints.Where(h => !pk.Contains(h))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static object BuildEngineDatasetDigest(
+        string datasetId,
+        string tableName,
+        IReadOnlyList<object> columns,
+        IReadOnlyList<string> primaryKey,
+        IReadOnlyList<string> joinHints)
+    {
+        return new
+        {
+            datasetId,
+            tableName,
+            columns,
+            primaryKey,
+            joinHints
+        };
+    }
+
+    private static IReadOnlyList<string> ParseJoinHints(string joinHints)
+    {
+        var parts = joinHints.Split(new[] { ',', ';', '|', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+        var list = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var raw in parts)
+        {
+            var token = raw.Trim();
+            if (string.IsNullOrWhiteSpace(token))
+                continue;
+
+            if (token.Contains("=", StringComparison.Ordinal))
+            {
+                var sides = token.Split('=', 2, StringSplitOptions.RemoveEmptyEntries);
+                foreach (var side in sides)
+                {
+                    var name = ExtractColumnName(side);
+                    if (seen.Add(name))
+                        list.Add(name);
+                }
+                continue;
+            }
+
+            var colName = ExtractColumnName(token);
+            if (seen.Add(colName))
+                list.Add(colName);
+        }
+
+        return list;
+    }
+
+    private static IReadOnlyList<string> InferJoinKeys(IEnumerable<string> columnNames, string? tableName)
+    {
+        var list = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var table = (tableName ?? string.Empty).Trim();
+
+        foreach (var name in columnNames)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                continue;
+
+            var normalized = name.Trim();
+            var isKey = string.Equals(normalized, "ID", StringComparison.OrdinalIgnoreCase)
+                        || normalized.EndsWith("_ID", StringComparison.OrdinalIgnoreCase)
+                        || normalized.EndsWith("Id", StringComparison.OrdinalIgnoreCase);
+
+            if (!string.IsNullOrWhiteSpace(table))
+            {
+                if (string.Equals(normalized, table + "Id", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(normalized, table + "_ID", StringComparison.OrdinalIgnoreCase))
+                {
+                    isKey = true;
+                }
+            }
+
+            if (isKey && seen.Add(normalized))
+                list.Add(normalized);
+        }
+
+        return list;
+    }
+
+    private static string ExtractColumnName(string token)
+    {
+        var trimmed = token.Trim();
+        if (trimmed.Contains('.', StringComparison.Ordinal))
+            trimmed = trimmed.Split('.').Last().Trim();
+        return string.IsNullOrWhiteSpace(trimmed) ? token.Trim() : trimmed;
     }
 
     private static int? TryGetIntFromSummary(TabularData? summary, string columnName)
@@ -900,3 +1092,4 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
 
 
 }
+
