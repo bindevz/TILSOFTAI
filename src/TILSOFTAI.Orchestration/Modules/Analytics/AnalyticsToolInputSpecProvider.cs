@@ -22,6 +22,7 @@ public sealed class AnalyticsToolInputSpecProvider : IToolInputSpecProvider
         spec.Args["topN"] = new ToolArgSpec("topN", ToolArgType.Int, Required: false, Default: 20, MinInt: 1, MaxInt: 200);
         spec.Args["maxGroups"] = new ToolArgSpec("maxGroups", ToolArgType.Int, Required: false, Default: 200, MinInt: 1, MaxInt: 5000);
         spec.Args["maxResultRows"] = new ToolArgSpec("maxResultRows", ToolArgType.Int, Required: false, Default: 500, MinInt: 1, MaxInt: 5000);
+        spec.Args["persistResult"] = new ToolArgSpec("persistResult", ToolArgType.Bool, Required: false, Default: false);
         return spec;
     }
 

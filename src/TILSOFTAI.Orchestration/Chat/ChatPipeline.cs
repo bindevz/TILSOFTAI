@@ -265,7 +265,7 @@ public sealed class ChatPipeline
 
                 TryCaptureToolArtifacts(toolResultJson);
 
-                var compactJson = ToolResultCompactor.CompactEnvelopeJson(toolResultJson, _tuning.MaxToolResultChars);
+                var compactJson = ToolResultCompactor.CompactEnvelopeJson(toolResultJson, ResolveMaxToolResultBytes());
                 messages.Add(new OpenAiChatMessage
                 {
                     Role = "tool",
@@ -600,6 +600,20 @@ public sealed class ChatPipeline
         var input = Encoding.UTF8.GetBytes(toolName + "|" + argsJson);
         var hash = SHA256.HashData(input);
         return toolName + ":" + Convert.ToHexString(hash);
+    }
+
+    private int ResolveMaxToolResultBytes()
+    {
+        if (_tuning.MaxToolResultBytes > 0)
+            return _tuning.MaxToolResultBytes;
+
+        if (_tuning.MaxToolResultChars > 0)
+        {
+            var approxBytes = _tuning.MaxToolResultChars * 2;
+            return Math.Clamp(approxBytes, 1000, 200000);
+        }
+
+        return 16000;
     }
 
     private ChatCompletionResponse MapToApiResponse(OpenAiChatCompletionResponse? raw, string model, string assistantContent, IReadOnlyCollection<ChatCompletionMessage> incoming)

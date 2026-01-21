@@ -12,16 +12,17 @@ public sealed class AnalyticsToolsPlugin
     public AnalyticsToolsPlugin(ToolInvoker invoker) => _invoker = invoker;
 
     [KernelFunction("run")]
-    [Description("Chạy pipeline phân tích (groupBy/sort/topN/select/filter) trên datasetId.")]
+    [Description("Chạy pipeline phân tích (groupBy/sort/topN/select/filter/derive/percentOfTotal/dateBucket) trên datasetId.")]
     public Task<object> RunAsync(
         string datasetId,
-        [Description("Pipeline JSON array. Mỗi step là object với 'op' (filter/groupBy/sort/topN/select).")]
+        [Description("Pipeline JSON array. Mỗi step là object với 'op' (filter/groupBy/sort/topN/select/derive/percentOfTotal/dateBucket).")]
         JsonElement pipeline,
         int topN = 20,
         int maxGroups = 200,
         int maxResultRows = 500,
+        bool persistResult = false,
         CancellationToken ct = default)
-        => _invoker.ExecuteAsync("analytics.run", new { datasetId, pipeline, topN, maxGroups, maxResultRows }, ct);
+        => _invoker.ExecuteAsync("analytics.run", new { datasetId, pipeline, topN, maxGroups, maxResultRows, persistResult }, ct);
 
     [KernelFunction("atomic_catalog_search")]
     [Description("Tìm stored procedure phù hợp trong catalog (full-text). RULE: Nếu không chắc spName, hãy gọi tool này trước rồi mới gọi atomic_query_execute.")]
@@ -60,3 +61,4 @@ public sealed class AnalyticsToolsPlugin
             previewRows
         }, ct);
 }
+

@@ -26,5 +26,6 @@ public enum TabularType
     Double = 2,
     Decimal = 3,
     Boolean = 4,
-    DateTime = 5
+    DateTime = 5,
+    Int64 = 6
 }

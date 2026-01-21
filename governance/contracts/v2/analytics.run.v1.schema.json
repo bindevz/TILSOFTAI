@@ -55,6 +55,12 @@
             "type": "string"
           }
         },
+        "resultDatasetId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "error": {
           "type": [
             "object",
@@ -157,6 +163,12 @@
               }
             }
           }
+        },
+        "resultDatasetId": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     }

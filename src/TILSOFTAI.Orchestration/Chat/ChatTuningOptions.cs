@@ -23,6 +23,11 @@ public sealed class ChatTuningOptions
     public int MaxToolResultChars { get; set; } = 12000;
 
     /// <summary>
+    /// Max bytes allowed for a compacted tool result (preferred over MaxToolResultChars).
+    /// </summary>
+    public int MaxToolResultBytes { get; set; } = 16000;
+
+    /// <summary>
     /// Default max_tokens for OpenAI-compatible chat completions when the client does not provide one.
     /// </summary>
     public int MaxTokens { get; set; } = 800;

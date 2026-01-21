@@ -27,6 +27,7 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
         var dyn = (DynamicToolIntent)intent;
         var datasetId = dyn.GetStringRequired("datasetId");
         var pipeline = dyn.GetJsonRequired("pipeline");
+        var persistResult = dyn.GetBool("persistResult", false);
 
         var bounds = new AnalyticsService.RunBounds(
             TopN: dyn.GetInt("topN", 20),
@@ -49,7 +50,7 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
         AnalyticsService.RunResult result;
         try
         {
-            result = await _analyticsService.RunAsync(datasetId, pipeline, bounds, context, cancellationToken);
+            result = await _analyticsService.RunAsync(datasetId, pipeline, bounds, context, cancellationToken, persistResult);
         }
         catch (Exception ex)
         {
@@ -68,7 +69,8 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
             {
                 columns = result.Schema.Select(c => c.Name),
                 rows = previewRows
-            }
+            },
+            resultDatasetId = result.ResultDatasetId
         };
 
         var payload = new
@@ -83,7 +85,8 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
                 datasetId = result.DatasetId,
                 rowCount = result.RowCount,
                 columnCount = result.ColumnCount,
-                warnings = result.Warnings
+                warnings = result.Warnings,
+                resultDatasetId = result.ResultDatasetId
             },
             evidence = payloadEvidence
         };
@@ -115,6 +118,17 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
             }
         };
 
+        if (!string.IsNullOrWhiteSpace(result.ResultDatasetId))
+        {
+            evidence.Add(new EnvelopeEvidenceItemV1
+            {
+                Id = "result_dataset",
+                Type = "metric",
+                Title = "Result dataset",
+                Payload = new { resultDatasetId = result.ResultDatasetId }
+            });
+        }
+
         var extras = new ToolDispatchExtras(
             Source: new EnvelopeSourceV1 { System = "analytics", Name = "atomic-data-engine", Cache = "na" },
             Evidence: evidence);
@@ -141,7 +155,7 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
 
         var allowedOps = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "filter", "groupby", "sort", "topn", "select", "join"
+            "filter", "groupby", "sort", "topn", "select", "join", "derive", "percentoftotal", "datebucket"
         };
 
         foreach (var step in steps)
@@ -188,6 +202,15 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
                 case "join":
                     columns = ValidateJoin(step, columns, context, errors);
                     break;
+                case "derive":
+                    columns = ValidateDerive(step, columns, errors);
+                    break;
+                case "percentoftotal":
+                    columns = ValidatePercentOfTotal(step, columns, errors);
+                    break;
+                case "datebucket":
+                    columns = ValidateDateBucket(step, columns, errors);
+                    break;
             }
         }
 
@@ -222,6 +245,18 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
         var col = colEl.GetString() ?? string.Empty;
         if (!columns.ContainsKey(col))
             errors.Add($"filter.column '{col}' does not exist.");
+
+        var allowedOperators = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "eq", "ne", "gt", "gte", "lt", "lte", "in", "between", "contains", "startswith"
+        };
+
+        var op = step.TryGetProperty("operator", out var opEl) && opEl.ValueKind == JsonValueKind.String
+            ? opEl.GetString()
+            : "eq";
+        var opNorm = (op ?? "eq").Trim().ToLowerInvariant();
+        if (!allowedOperators.Contains(opNorm))
+            errors.Add($"filter.operator '{op}' is invalid. Allowed: {string.Join(", ", allowedOperators)}.");
     }
 
     private static Dictionary<string, string> ValidateGroupBy(JsonElement step, Dictionary<string, string> columns, List<string> errors)
@@ -251,6 +286,10 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
         }
 
         var aggs = new List<(string op, string? column, string asName)>();
+        var allowedAggOps = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "count", "sum", "avg", "min", "max"
+        };
         if (step.TryGetProperty("aggregates", out var agEl) && agEl.ValueKind == JsonValueKind.Array)
         {
             foreach (var a in agEl.EnumerateArray())
@@ -261,6 +300,11 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
                 var asName = a.TryGetProperty("as", out var asEl) && asEl.ValueKind == JsonValueKind.String ? asEl.GetString() : null;
                 if (string.IsNullOrWhiteSpace(op)) continue;
                 var opNorm = op!.Trim().ToLowerInvariant();
+                if (!allowedAggOps.Contains(opNorm))
+                {
+                    errors.Add($"aggregate.op '{op}' is invalid. Allowed: {string.Join(", ", allowedAggOps)}.");
+                    continue;
+                }
                 var name = string.IsNullOrWhiteSpace(asName)
                     ? (opNorm == "count" ? "count" : $"{opNorm}_{col}")
                     : asName!.Trim();
@@ -396,9 +440,17 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
             ? prefixEl.GetString()
             : "r_";
         if (string.IsNullOrWhiteSpace(rightPrefix))
+        {
             rightPrefix = "r_";
+            errors.Add("join.rightPrefix is empty; default prefix 'r_' is required.");
+        }
 
         var selectRight = ReadStringArray(step, "selectRight");
+        if (selectRight.Count > 50)
+            errors.Add("join.selectRight exceeds max of 50 columns.");
+
+        if (selectRight.Count == 0 && rightColumns.Count > 50)
+            errors.Add("join.selectRight is required when right dataset has more than 50 columns.");
         var rightToInclude = selectRight.Count > 0 ? selectRight : rightColumns.Keys.ToList();
 
         foreach (var col in rightToInclude)
@@ -420,6 +472,158 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
         }
 
         return columns;
+    }
+
+    private static Dictionary<string, string> ValidateDerive(JsonElement step, Dictionary<string, string> columns, List<string> errors)
+    {
+        var asName = step.TryGetProperty("as", out var asEl) && asEl.ValueKind == JsonValueKind.String ? asEl.GetString() : null;
+        if (string.IsNullOrWhiteSpace(asName))
+        {
+            errors.Add("derive.as is required.");
+            return columns;
+        }
+
+        var op = step.TryGetProperty("operator", out var opEl) && opEl.ValueKind == JsonValueKind.String ? opEl.GetString() : null;
+        var opNorm = (op ?? string.Empty).Trim().ToLowerInvariant();
+        var allowedOps = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "add", "sub", "mul", "div" };
+        if (!allowedOps.Contains(opNorm))
+            errors.Add($"derive.operator '{op}' is invalid. Allowed: {string.Join(", ", allowedOps)}.");
+
+        ValidateDeriveOperand(step, "left", columns, errors);
+        ValidateDeriveOperand(step, "right", columns, errors);
+
+        var next = new Dictionary<string, string>(columns, StringComparer.OrdinalIgnoreCase);
+        if (!next.ContainsKey(asName!))
+            next[asName!] = "Double";
+        else
+            errors.Add($"derive.as '{asName}' already exists.");
+
+        return next;
+    }
+
+    private static void ValidateDeriveOperand(JsonElement step, string name, Dictionary<string, string> columns, List<string> errors)
+    {
+        if (!step.TryGetProperty(name, out var el))
+        {
+            errors.Add($"derive.{name} is required.");
+            return;
+        }
+
+        if (TryGetOperandColumn(el, out var columnName))
+        {
+            if (!columns.TryGetValue(columnName, out var typeName))
+            {
+                errors.Add($"derive.{name} column '{columnName}' does not exist.");
+            }
+            else if (!IsNumericType(typeName))
+            {
+                errors.Add($"derive.{name} column '{columnName}' must be numeric.");
+            }
+            return;
+        }
+
+        if (!IsNumericLiteral(el))
+            errors.Add($"derive.{name} must be a column name or numeric literal.");
+    }
+
+    private static Dictionary<string, string> ValidatePercentOfTotal(JsonElement step, Dictionary<string, string> columns, List<string> errors)
+    {
+        if (!step.TryGetProperty("column", out var colEl) || colEl.ValueKind != JsonValueKind.String)
+        {
+            errors.Add("percentOfTotal.column is required.");
+            return columns;
+        }
+
+        var col = colEl.GetString() ?? string.Empty;
+        if (!columns.TryGetValue(col, out var typeName))
+        {
+            errors.Add($"percentOfTotal.column '{col}' does not exist.");
+            return columns;
+        }
+
+        if (!IsNumericType(typeName))
+            errors.Add($"percentOfTotal.column '{col}' must be numeric.");
+
+        var asName = step.TryGetProperty("as", out var asEl) && asEl.ValueKind == JsonValueKind.String
+            ? asEl.GetString()
+            : $"{col}_pct";
+
+        var next = new Dictionary<string, string>(columns, StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(asName))
+        {
+            if (next.ContainsKey(asName))
+                errors.Add($"percentOfTotal.as '{asName}' already exists.");
+            else
+                next[asName] = "Double";
+        }
+
+        return next;
+    }
+
+    private static Dictionary<string, string> ValidateDateBucket(JsonElement step, Dictionary<string, string> columns, List<string> errors)
+    {
+        if (!step.TryGetProperty("column", out var colEl) || colEl.ValueKind != JsonValueKind.String)
+        {
+            errors.Add("dateBucket.column is required.");
+            return columns;
+        }
+
+        var col = colEl.GetString() ?? string.Empty;
+        if (!columns.ContainsKey(col))
+            errors.Add($"dateBucket.column '{col}' does not exist.");
+
+        var unit = step.TryGetProperty("unit", out var unitEl) && unitEl.ValueKind == JsonValueKind.String
+            ? unitEl.GetString()
+            : "month";
+        var unitNorm = (unit ?? string.Empty).Trim().ToLowerInvariant();
+        var allowedUnits = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "day", "week", "month", "quarter", "year" };
+        if (!allowedUnits.Contains(unitNorm))
+            errors.Add($"dateBucket.unit '{unit}' is invalid. Allowed: {string.Join(", ", allowedUnits)}.");
+
+        var asName = step.TryGetProperty("as", out var asEl) && asEl.ValueKind == JsonValueKind.String
+            ? asEl.GetString()
+            : $"{col}_{unitNorm}";
+
+        var next = new Dictionary<string, string>(columns, StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(asName))
+        {
+            if (next.ContainsKey(asName))
+                errors.Add($"dateBucket.as '{asName}' already exists.");
+            else
+                next[asName] = "DateTime";
+        }
+
+        return next;
+    }
+
+    private static bool TryGetOperandColumn(JsonElement operand, out string? columnName)
+    {
+        columnName = null;
+        if (operand.ValueKind == JsonValueKind.String)
+        {
+            columnName = operand.GetString();
+            return !string.IsNullOrWhiteSpace(columnName);
+        }
+
+        if (operand.ValueKind == JsonValueKind.Object &&
+            operand.TryGetProperty("column", out var colEl) &&
+            colEl.ValueKind == JsonValueKind.String)
+        {
+            columnName = colEl.GetString();
+            return !string.IsNullOrWhiteSpace(columnName);
+        }
+
+        return false;
+    }
+
+    private static bool IsNumericLiteral(JsonElement operand)
+    {
+        if (operand.ValueKind == JsonValueKind.Number)
+            return true;
+
+        return operand.ValueKind == JsonValueKind.Object
+               && operand.TryGetProperty("value", out var valueEl)
+               && valueEl.ValueKind == JsonValueKind.Number;
     }
 
     private static List<string> ReadStringArray(JsonElement step, string propName)

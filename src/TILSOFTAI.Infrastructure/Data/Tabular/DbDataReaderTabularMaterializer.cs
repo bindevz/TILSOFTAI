@@ -57,9 +57,7 @@ public static class DbDataReaderTabularMaterializer
         if (t == typeof(string) || t == typeof(char) || t == typeof(Guid)) return TabularType.String;
 
         if (t == typeof(byte) || t == typeof(short) || t == typeof(int)) return TabularType.Int32;
-
-        // Int64 not available in TabularType; represent as String to avoid overflow or lossy conversion.
-        if (t == typeof(long)) return TabularType.String;
+        if (t == typeof(long)) return TabularType.Int64;
 
         if (t == typeof(bool)) return TabularType.Boolean;
         if (t == typeof(float) || t == typeof(double)) return TabularType.Double;

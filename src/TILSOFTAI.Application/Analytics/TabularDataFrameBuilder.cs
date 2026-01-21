@@ -41,13 +41,14 @@ public static class TabularDataFrameBuilder
 
     private static DataFrameColumn CreateColumn(TabularColumn c, int rowCount)
     {
-        // Keep the implementation conservative: only reference column types we already rely on.
-        // This avoids version-specific column classes breaking compilation.
         return c.Type switch
         {
             TabularType.Int32 => new Int32DataFrameColumn(c.Name, rowCount),
+            TabularType.Int64 => new Int64DataFrameColumn(c.Name, rowCount),
             TabularType.Double => new DoubleDataFrameColumn(c.Name, rowCount),
-            TabularType.Decimal => new DoubleDataFrameColumn(c.Name, rowCount),
+            TabularType.Decimal => new DecimalDataFrameColumn(c.Name, rowCount),
+            TabularType.Boolean => new BooleanDataFrameColumn(c.Name, rowCount),
+            TabularType.DateTime => new DateTimeDataFrameColumn(c.Name, rowCount),
             _ => new StringDataFrameColumn(c.Name, rowCount)
         };
     }
@@ -61,17 +62,42 @@ public static class TabularDataFrameBuilder
             return type switch
             {
                 TabularType.Int32 => Convert.ToInt32(value),
+                TabularType.Int64 => Convert.ToInt64(value),
                 TabularType.Double => Convert.ToDouble(value),
-                TabularType.Decimal => Convert.ToDouble(value),
-                TabularType.Boolean => value.ToString(),
-                TabularType.DateTime => value.ToString(),
+                TabularType.Decimal => Convert.ToDecimal(value),
+                TabularType.Boolean => Convert.ToBoolean(value),
+                TabularType.DateTime => CoerceDateTime(value),
                 _ => value.ToString()
             };
         }
         catch
         {
-            // Fail soft: keep the pipeline running and let analysis steps treat it as string.
-            return value.ToString();
+            return type == TabularType.String ? value.ToString() : null;
         }
+    }
+
+    private static DateTime? CoerceDateTime(object value)
+    {
+        if (value is DateTimeOffset dto)
+            return dto.UtcDateTime;
+
+        if (value is DateTime dt)
+        {
+            return dt.Kind == DateTimeKind.Unspecified
+                ? DateTime.SpecifyKind(dt, DateTimeKind.Utc)
+                : dt.ToUniversalTime();
+        }
+
+        if (value is string s && DateTime.TryParse(s, out var parsed))
+        {
+            return parsed.Kind == DateTimeKind.Unspecified
+                ? DateTime.SpecifyKind(parsed, DateTimeKind.Utc)
+                : parsed.ToUniversalTime();
+        }
+
+        var converted = Convert.ToDateTime(value);
+        return converted.Kind == DateTimeKind.Unspecified
+            ? DateTime.SpecifyKind(converted, DateTimeKind.Utc)
+            : converted.ToUniversalTime();
     }
 }

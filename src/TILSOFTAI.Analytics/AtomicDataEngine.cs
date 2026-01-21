@@ -1,4 +1,5 @@
 using Microsoft.Data.Analysis;
+using System.Globalization;
 using System.Text.Json;
 
 namespace TILSOFTAI.Analytics;
@@ -96,6 +97,15 @@ public sealed class AtomicDataEngine
                         break;
                     case "join":
                         steps.Add(JoinStep.Parse(s));
+                        break;
+                    case "derive":
+                        steps.Add(DeriveStep.Parse(s));
+                        break;
+                    case "percentoftotal":
+                        steps.Add(PercentOfTotalStep.Parse(s));
+                        break;
+                    case "datebucket":
+                        steps.Add(DateBucketStep.Parse(s));
                         break;
                     default:
                         warnings.Add($"Unsupported op '{op}' was ignored.");
@@ -280,6 +290,111 @@ public sealed class AtomicDataEngine
         }
     }
 
+    internal sealed record Operand(string? Column, decimal? Value);
+
+    internal sealed record DeriveStep(string As, string Operator, Operand Left, Operand Right) : Step("derive")
+    {
+        public static DeriveStep Parse(JsonElement e)
+        {
+            var asName = e.TryGetProperty("as", out var asEl) && asEl.ValueKind == JsonValueKind.String ? asEl.GetString() : null;
+            if (string.IsNullOrWhiteSpace(asName))
+                throw new ArgumentException("derive.as is required.");
+
+            var op = e.TryGetProperty("operator", out var opEl) && opEl.ValueKind == JsonValueKind.String
+                ? opEl.GetString()
+                : "add";
+            op = (op ?? "add").Trim().ToLowerInvariant();
+            if (op is not ("add" or "sub" or "mul" or "div"))
+                throw new ArgumentException("derive.operator must be add|sub|mul|div.");
+
+            var left = ParseOperand(e, "left");
+            var right = ParseOperand(e, "right");
+            if (left is null || right is null)
+                throw new ArgumentException("derive.left and derive.right are required.");
+
+            return new DeriveStep(asName!.Trim(), op, left, right);
+        }
+
+        private static Operand? ParseOperand(JsonElement e, string name)
+        {
+            if (!e.TryGetProperty(name, out var el))
+                return null;
+
+            if (el.ValueKind == JsonValueKind.String)
+            {
+                var col = el.GetString();
+                if (string.IsNullOrWhiteSpace(col))
+                    return null;
+                return new Operand(col.Trim(), null);
+            }
+
+            if (el.ValueKind == JsonValueKind.Number)
+            {
+                if (el.TryGetDecimal(out var dec))
+                    return new Operand(null, dec);
+                if (el.TryGetDouble(out var dbl))
+                    return new Operand(null, (decimal)dbl);
+            }
+
+            if (el.ValueKind == JsonValueKind.Object)
+            {
+                if (el.TryGetProperty("column", out var colEl) && colEl.ValueKind == JsonValueKind.String)
+                {
+                    var col = colEl.GetString();
+                    if (!string.IsNullOrWhiteSpace(col))
+                        return new Operand(col.Trim(), null);
+                }
+
+                if (el.TryGetProperty("value", out var valEl) && valEl.ValueKind == JsonValueKind.Number)
+                {
+                    if (valEl.TryGetDecimal(out var dec))
+                        return new Operand(null, dec);
+                    if (valEl.TryGetDouble(out var dbl))
+                        return new Operand(null, (decimal)dbl);
+                }
+            }
+
+            return null;
+        }
+    }
+
+    internal sealed record PercentOfTotalStep(string Column, string As) : Step("percentOfTotal")
+    {
+        public static PercentOfTotalStep Parse(JsonElement e)
+        {
+            var col = e.TryGetProperty("column", out var c) && c.ValueKind == JsonValueKind.String ? c.GetString() : null;
+            if (string.IsNullOrWhiteSpace(col))
+                throw new ArgumentException("percentOfTotal.column is required.");
+
+            var asName = e.TryGetProperty("as", out var asEl) && asEl.ValueKind == JsonValueKind.String
+                ? asEl.GetString()
+                : $"{col}_pct";
+
+            return new PercentOfTotalStep(col!.Trim(), (asName ?? $"{col}_pct").Trim());
+        }
+    }
+
+    internal sealed record DateBucketStep(string Column, string Unit, string As) : Step("dateBucket")
+    {
+        public static DateBucketStep Parse(JsonElement e)
+        {
+            var col = e.TryGetProperty("column", out var c) && c.ValueKind == JsonValueKind.String ? c.GetString() : null;
+            if (string.IsNullOrWhiteSpace(col))
+                throw new ArgumentException("dateBucket.column is required.");
+
+            var unit = e.TryGetProperty("unit", out var u) && u.ValueKind == JsonValueKind.String ? u.GetString() : "month";
+            unit = (unit ?? "month").Trim().ToLowerInvariant();
+            if (unit is not ("day" or "week" or "month" or "quarter" or "year"))
+                throw new ArgumentException("dateBucket.unit must be day|week|month|quarter|year.");
+
+            var asName = e.TryGetProperty("as", out var asEl) && asEl.ValueKind == JsonValueKind.String
+                ? asEl.GetString()
+                : $"{col}_{unit}";
+
+            return new DateBucketStep(col!.Trim(), unit, (asName ?? $"{col}_{unit}").Trim());
+        }
+    }
+
     internal static class AnalysisExecutor
     {
         public static DataFrame Execute(DataFrame df, AnalysisPipeline pipeline, EngineBounds bounds, Func<string, DataFrame?> datasetResolver, List<string> warnings)
@@ -296,7 +411,7 @@ public sealed class AtomicDataEngine
                         current = ApplySelectColumns(current, s);
                         break;
                     case GroupByStep g:
-                        current = ApplyGroupBy(current, g, bounds.MaxGroups);
+                        current = ApplyGroupBy(current, g, bounds.MaxGroups, warnings);
                         break;
                     case SortStep s:
                         current = ApplySort(current, s);
@@ -306,6 +421,15 @@ public sealed class AtomicDataEngine
                         break;
                     case JoinStep j:
                         current = ApplyJoin(current, j, bounds, datasetResolver, warnings);
+                        break;
+                    case DeriveStep d:
+                        current = ApplyDerive(current, d);
+                        break;
+                    case PercentOfTotalStep p:
+                        current = ApplyPercentOfTotal(current, p);
+                        break;
+                    case DateBucketStep b:
+                        current = ApplyDateBucket(current, b);
                         break;
                 }
             }
@@ -331,19 +455,119 @@ public sealed class AtomicDataEngine
         {
             if (!TryGetColumn(df, step.Column, out var col))
                 return df;
+
+            var kind = GetColumnKind(col);
+            var useDecimal = kind == ColumnKind.Numeric && col is DecimalDataFrameColumn;
+            var op = step.Operator;
+            var raw = step.Value?.Trim();
+
+            var filterString = raw ?? string.Empty;
+            var hasFilterValue = !string.IsNullOrWhiteSpace(filterString);
+
+            var hasNumericFilter = false;
+            var filterDecimal = 0m;
+            var filterDouble = 0d;
+            if (kind == ColumnKind.Numeric && hasFilterValue)
+                hasNumericFilter = useDecimal ? TryParseDecimal(filterString, out filterDecimal) : TryParseDouble(filterString, out filterDouble);
+
+            var hasDateFilter = false;
+            var filterDate = DateTime.MinValue;
+            if (kind == ColumnKind.DateTime && hasFilterValue)
+                hasDateFilter = TryParseDate(filterString, out filterDate);
+
+            var hasBoolFilter = false;
+            var filterBool = false;
+            if (kind == ColumnKind.Boolean && hasFilterValue)
+                hasBoolFilter = TryParseBool(filterString, out filterBool);
+
+            HashSet<string>? stringSet = null;
+            HashSet<double>? doubleSet = null;
+            HashSet<decimal>? decimalSet = null;
+            HashSet<DateTime>? dateSet = null;
+            HashSet<bool>? boolSet = null;
+
+            if (op == "in")
+            {
+                var tokens = ParseTokens(filterString);
+                switch (kind)
+                {
+                    case ColumnKind.Numeric:
+                        if (useDecimal)
+                            decimalSet = ToDecimalSet(tokens);
+                        else
+                            doubleSet = ToDoubleSet(tokens);
+                        break;
+                    case ColumnKind.DateTime:
+                        dateSet = ToDateSet(tokens);
+                        break;
+                    case ColumnKind.Boolean:
+                        boolSet = ToBoolSet(tokens);
+                        break;
+                    default:
+                        stringSet = new HashSet<string>(tokens, StringComparer.OrdinalIgnoreCase);
+                        break;
+                }
+            }
+
+            var hasBetween = false;
+            var minDec = 0m;
+            var maxDec = 0m;
+            var minDbl = 0d;
+            var maxDbl = 0d;
+            var minDate = DateTime.MinValue;
+            var maxDate = DateTime.MinValue;
+            string? minText = null;
+            string? maxText = null;
+            bool minBool = false;
+            bool maxBool = false;
+
+            if (op == "between" && TryParseBetweenTokens(filterString, out var minToken, out var maxToken))
+            {
+                switch (kind)
+                {
+                    case ColumnKind.Numeric:
+                        if (useDecimal && TryParseDecimal(minToken, out minDec) && TryParseDecimal(maxToken, out maxDec))
+                            hasBetween = true;
+                        else if (!useDecimal && TryParseDouble(minToken, out minDbl) && TryParseDouble(maxToken, out maxDbl))
+                            hasBetween = true;
+                        break;
+                    case ColumnKind.DateTime:
+                        if (TryParseDate(minToken, out minDate) && TryParseDate(maxToken, out maxDate))
+                            hasBetween = true;
+                        break;
+                    case ColumnKind.Boolean:
+                        if (TryParseBool(minToken, out minBool) && TryParseBool(maxToken, out maxBool))
+                            hasBetween = true;
+                        break;
+                    default:
+                        minText = minToken;
+                        maxText = maxToken;
+                        hasBetween = true;
+                        break;
+                }
+            }
+
             var keep = new List<long>();
             for (long i = 0; i < df.Rows.Count; i++)
             {
-                var v = col[i];
-                var s = v?.ToString() ?? string.Empty;
-                var pass = step.Operator switch
+                var cell = col[i];
+                var pass = op switch
                 {
-                    "eq" => string.Equals(s, step.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase),
-                    "contains" => s.IndexOf(step.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) >= 0,
-                    _ => string.Equals(s, step.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase)
+                    "eq" => EvaluateEq(cell, kind, useDecimal, filterString, hasNumericFilter, filterDecimal, filterDouble, hasDateFilter, filterDate, hasBoolFilter, filterBool),
+                    "ne" => !EvaluateEq(cell, kind, useDecimal, filterString, hasNumericFilter, filterDecimal, filterDouble, hasDateFilter, filterDate, hasBoolFilter, filterBool),
+                    "gt" => EvaluateCompare(cell, kind, useDecimal, filterString, hasNumericFilter, filterDecimal, filterDouble, hasDateFilter, filterDate, hasBoolFilter, filterBool, direction: 1),
+                    "gte" => EvaluateCompare(cell, kind, useDecimal, filterString, hasNumericFilter, filterDecimal, filterDouble, hasDateFilter, filterDate, hasBoolFilter, filterBool, direction: 1, allowEqual: true),
+                    "lt" => EvaluateCompare(cell, kind, useDecimal, filterString, hasNumericFilter, filterDecimal, filterDouble, hasDateFilter, filterDate, hasBoolFilter, filterBool, direction: -1),
+                    "lte" => EvaluateCompare(cell, kind, useDecimal, filterString, hasNumericFilter, filterDecimal, filterDouble, hasDateFilter, filterDate, hasBoolFilter, filterBool, direction: -1, allowEqual: true),
+                    "in" => EvaluateIn(cell, kind, useDecimal, stringSet, doubleSet, decimalSet, dateSet, boolSet),
+                    "between" => EvaluateBetween(cell, kind, useDecimal, hasBetween, minDec, maxDec, minDbl, maxDbl, minDate, maxDate, minText, maxText, minBool, maxBool),
+                    "contains" => (cell?.ToString() ?? string.Empty).IndexOf(filterString, StringComparison.OrdinalIgnoreCase) >= 0,
+                    "startswith" => (cell?.ToString() ?? string.Empty).StartsWith(filterString, StringComparison.OrdinalIgnoreCase),
+                    _ => EvaluateEq(cell, kind, useDecimal, filterString, hasNumericFilter, filterDecimal, filterDouble, hasDateFilter, filterDate, hasBoolFilter, filterBool)
                 };
 
-                if (pass) keep.Add(i);
+                if (pass)
+                    keep.Add(i);
             }
 
             return TakeRows(df, keep);
@@ -360,7 +584,7 @@ public sealed class AtomicDataEngine
             return cols.Count == 0 ? df : new DataFrame(cols);
         }
 
-        private static DataFrame ApplyGroupBy(DataFrame df, GroupByStep step, int maxGroups)
+        private static DataFrame ApplyGroupBy(DataFrame df, GroupByStep step, int maxGroups, List<string> warnings)
         {
             // Build a column index map.
             var colIdx = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -391,6 +615,7 @@ public sealed class AtomicDataEngine
             }
 
             var groups = new Dictionary<string, AggState>(StringComparer.OrdinalIgnoreCase);
+            var groupsTruncated = false;
 
             for (long i = 0; i < df.Rows.Count; i++)
             {
@@ -404,13 +629,20 @@ public sealed class AtomicDataEngine
                 var key = string.Join("\u001F", keyParts);
                 if (!groups.TryGetValue(key, out var st))
                 {
-                    if (groups.Count >= maxGroups) continue; // drop beyond cap
+                    if (groups.Count >= maxGroups)
+                    {
+                        groupsTruncated = true;
+                        continue; // drop beyond cap
+                    }
                     st = new AggState(keyParts, step.Aggregates, aggUseDecimal);
                     groups[key] = st;
                 }
 
                 st.Accumulate(df, i);
             }
+
+            if (groupsTruncated)
+                warnings.Add($"Groups truncated to {maxGroups}.");
 
             // Materialize result DataFrame.
             var resultColumns = new List<DataFrameColumn>();
@@ -535,6 +767,234 @@ public sealed class AtomicDataEngine
                 warnings.Add($"Join rows truncated to {bounds.MaxJoinRows} rows.");
 
             return BuildJoinedDataFrame(left, right, outRows, rightColumns, step.RightPrefix, warnings);
+        }
+
+        private static DataFrame ApplyDerive(DataFrame df, DeriveStep step)
+        {
+            var leftIndex = step.Left.Column is not null ? GetColumnIndex(df, step.Left.Column) : -1;
+            var rightIndex = step.Right.Column is not null ? GetColumnIndex(df, step.Right.Column) : -1;
+
+            if (step.Left.Column is not null && leftIndex < 0)
+                throw new ArgumentException($"derive.left column '{step.Left.Column}' does not exist.");
+            if (step.Right.Column is not null && rightIndex < 0)
+                throw new ArgumentException($"derive.right column '{step.Right.Column}' does not exist.");
+
+            var useDecimal = IsDecimalOperand(df, step.Left, leftIndex)
+                             || IsDecimalOperand(df, step.Right, rightIndex)
+                             || IsDecimalLiteral(step.Left)
+                             || IsDecimalLiteral(step.Right);
+
+            var rowCount = df.Rows.Count;
+            DataFrameColumn result = useDecimal
+                ? new DecimalDataFrameColumn(step.As, rowCount)
+                : new DoubleDataFrameColumn(step.As, rowCount);
+
+            for (long i = 0; i < rowCount; i++)
+            {
+                if (!TryGetOperandValue(df, step.Left, leftIndex, i, useDecimal, out var leftDec, out var leftDbl)
+                    || !TryGetOperandValue(df, step.Right, rightIndex, i, useDecimal, out var rightDec, out var rightDbl))
+                {
+                    result[i] = null;
+                    continue;
+                }
+
+                if (useDecimal)
+                {
+                    decimal? value = step.Operator switch
+                    {
+                        "add" => leftDec + rightDec,
+                        "sub" => leftDec - rightDec,
+                        "mul" => leftDec * rightDec,
+                        "div" => rightDec == 0m ? null : leftDec / rightDec,
+                        _ => null
+                    };
+
+                    result[i] = value;
+                }
+                else
+                {
+                    double? value = step.Operator switch
+                    {
+                        "add" => leftDbl + rightDbl,
+                        "sub" => leftDbl - rightDbl,
+                        "mul" => leftDbl * rightDbl,
+                        "div" => Math.Abs(rightDbl) < double.Epsilon ? null : leftDbl / rightDbl,
+                        _ => null
+                    };
+
+                    result[i] = value;
+                }
+            }
+
+            var cols = new List<DataFrameColumn>(df.Columns.Count + 1);
+            foreach (var c in df.Columns)
+                cols.Add(c);
+            cols.Add(result);
+            return new DataFrame(cols);
+        }
+
+        private static DataFrame ApplyPercentOfTotal(DataFrame df, PercentOfTotalStep step)
+        {
+            if (!TryGetColumn(df, step.Column, out var col))
+                return df;
+
+            var useDecimal = col is DecimalDataFrameColumn;
+            var rowCount = df.Rows.Count;
+            decimal totalDec = 0m;
+            double totalDbl = 0d;
+
+            for (long i = 0; i < rowCount; i++)
+            {
+                var value = col[i];
+                if (useDecimal)
+                {
+                    if (TryGetDecimalValue(value, out var dec))
+                        totalDec += dec;
+                }
+                else
+                {
+                    if (TryGetDoubleValue(value, out var dbl))
+                        totalDbl += dbl;
+                }
+            }
+
+            DataFrameColumn result = useDecimal
+                ? new DecimalDataFrameColumn(step.As, rowCount)
+                : new DoubleDataFrameColumn(step.As, rowCount);
+
+            for (long i = 0; i < rowCount; i++)
+            {
+                var value = col[i];
+                if (useDecimal)
+                {
+                    if (totalDec == 0m || !TryGetDecimalValue(value, out var dec))
+                    {
+                        result[i] = null;
+                        continue;
+                    }
+
+                    result[i] = (dec / totalDec) * 100m;
+                }
+                else
+                {
+                    if (Math.Abs(totalDbl) < double.Epsilon || !TryGetDoubleValue(value, out var dbl))
+                    {
+                        result[i] = null;
+                        continue;
+                    }
+
+                    result[i] = (dbl / totalDbl) * 100d;
+                }
+            }
+
+            var cols = new List<DataFrameColumn>(df.Columns.Count + 1);
+            foreach (var c in df.Columns)
+                cols.Add(c);
+            cols.Add(result);
+            return new DataFrame(cols);
+        }
+
+        private static DataFrame ApplyDateBucket(DataFrame df, DateBucketStep step)
+        {
+            if (!TryGetColumn(df, step.Column, out var col))
+                return df;
+
+            var rowCount = df.Rows.Count;
+            var bucket = new DateTimeDataFrameColumn(step.As, rowCount);
+
+            for (long i = 0; i < rowCount; i++)
+            {
+                if (TryGetDateValue(col[i], out var dt))
+                    bucket[i] = BucketDate(dt, step.Unit);
+                else
+                    bucket[i] = null;
+            }
+
+            var cols = new List<DataFrameColumn>(df.Columns.Count + 1);
+            foreach (var c in df.Columns)
+                cols.Add(c);
+            cols.Add(bucket);
+            return new DataFrame(cols);
+        }
+
+        private static DateTime BucketDate(DateTime dt, string unit)
+        {
+            var utc = dt.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(dt, DateTimeKind.Utc) : dt.ToUniversalTime();
+            return unit switch
+            {
+                "day" => new DateTime(utc.Year, utc.Month, utc.Day, 0, 0, 0, DateTimeKind.Utc),
+                "week" => new DateTime(utc.Year, utc.Month, utc.Day, 0, 0, 0, DateTimeKind.Utc)
+                    .AddDays(-((7 + (int)utc.DayOfWeek - (int)DayOfWeek.Monday) % 7)),
+                "month" => new DateTime(utc.Year, utc.Month, 1, 0, 0, 0, DateTimeKind.Utc),
+                "quarter" =>
+                    new DateTime(utc.Year, ((utc.Month - 1) / 3) * 3 + 1, 1, 0, 0, 0, DateTimeKind.Utc),
+                "year" => new DateTime(utc.Year, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+                _ => new DateTime(utc.Year, utc.Month, utc.Day, 0, 0, 0, DateTimeKind.Utc)
+            };
+        }
+
+        private static bool TryGetOperandValue(
+            DataFrame df,
+            Operand operand,
+            int columnIndex,
+            long rowIndex,
+            bool useDecimal,
+            out decimal dec,
+            out double dbl)
+        {
+            dec = 0m;
+            dbl = 0d;
+
+            if (operand.Column is not null)
+            {
+                if (columnIndex < 0)
+                    return false;
+
+                var value = df.Columns[columnIndex][rowIndex];
+                if (useDecimal)
+                {
+                    if (TryGetDecimalValue(value, out dec))
+                    {
+                        dbl = (double)dec;
+                        return true;
+                    }
+                }
+                else
+                {
+                    if (TryGetDoubleValue(value, out dbl))
+                    {
+                        dec = (decimal)dbl;
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            if (operand.Value is not null)
+            {
+                dec = operand.Value.Value;
+                dbl = (double)dec;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool IsDecimalOperand(DataFrame df, Operand operand, int columnIndex)
+        {
+            if (operand.Column is null || columnIndex < 0)
+                return false;
+
+            return df.Columns[columnIndex] is DecimalDataFrameColumn;
+        }
+
+        private static bool IsDecimalLiteral(Operand operand)
+        {
+            if (operand.Column is not null || operand.Value is null)
+                return false;
+
+            return operand.Value.Value % 1m != 0m;
         }
 
         private sealed record JoinColumn(int Index, string Name);
@@ -741,14 +1201,19 @@ public sealed class AtomicDataEngine
             var idx = GetColumnIndex(df, step.By);
             if (idx < 0) return df;
 
-            // Sort using row indices (stable).
+            var col = df.Columns[idx];
+            var kind = GetColumnKind(col);
+            var useDecimal = kind == ColumnKind.Numeric && col is DecimalDataFrameColumn;
+
             var order = Enumerable.Range(0, (int)df.Rows.Count)
-                .Select(i => (i, v: df.Columns[idx][i]))
-                .OrderBy(t => t.v?.ToString(), StringComparer.OrdinalIgnoreCase)
-                .Select(t => (long)t.i)
+                .Select(i => (long)i)
                 .ToList();
 
-            if (step.Dir == "desc") order.Reverse();
+            order.Sort((a, b) => CompareCells(col[a], col[b], kind, useDecimal));
+
+            if (step.Dir == "desc")
+                order.Reverse();
+
             return TakeRows(df, order);
         }
 
@@ -828,6 +1293,519 @@ public sealed class AtomicDataEngine
                     return i;
             }
             return -1;
+        }
+
+        private enum ColumnKind
+        {
+            Numeric,
+            DateTime,
+            Boolean,
+            String
+        }
+
+        private static ColumnKind GetColumnKind(DataFrameColumn col)
+        {
+            var t = col.DataType;
+            if (t == typeof(byte) || t == typeof(short) || t == typeof(int) || t == typeof(long)
+                || t == typeof(float) || t == typeof(double) || t == typeof(decimal))
+                return ColumnKind.Numeric;
+            if (t == typeof(DateTime) || t == typeof(DateTimeOffset))
+                return ColumnKind.DateTime;
+            if (t == typeof(bool))
+                return ColumnKind.Boolean;
+            return ColumnKind.String;
+        }
+
+        private static bool EvaluateEq(
+            object? cell,
+            ColumnKind kind,
+            bool useDecimal,
+            string filterString,
+            bool hasNumericFilter,
+            decimal filterDecimal,
+            double filterDouble,
+            bool hasDateFilter,
+            DateTime filterDate,
+            bool hasBoolFilter,
+            bool filterBool)
+        {
+            if (cell is null)
+                return false;
+
+            switch (kind)
+            {
+                case ColumnKind.Numeric:
+                    if (!hasNumericFilter) return false;
+                    if (useDecimal && TryGetDecimalValue(cell, out var dec))
+                        return dec == filterDecimal;
+                    if (!useDecimal && TryGetDoubleValue(cell, out var dbl))
+                        return dbl == filterDouble;
+                    return false;
+                case ColumnKind.DateTime:
+                    if (!hasDateFilter) return false;
+                    if (TryGetDateValue(cell, out var dt))
+                        return dt == filterDate;
+                    return false;
+                case ColumnKind.Boolean:
+                    if (!hasBoolFilter) return false;
+                    if (TryGetBoolValue(cell, out var b))
+                        return b == filterBool;
+                    return false;
+                default:
+                    return string.Equals(cell.ToString() ?? string.Empty, filterString, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        private static bool EvaluateCompare(
+            object? cell,
+            ColumnKind kind,
+            bool useDecimal,
+            string filterString,
+            bool hasNumericFilter,
+            decimal filterDecimal,
+            double filterDouble,
+            bool hasDateFilter,
+            DateTime filterDate,
+            bool hasBoolFilter,
+            bool filterBool,
+            int direction,
+            bool allowEqual = false)
+        {
+            if (cell is null)
+                return false;
+
+            int cmp;
+            switch (kind)
+            {
+                case ColumnKind.Numeric:
+                    if (!hasNumericFilter) return false;
+                    if (useDecimal && TryGetDecimalValue(cell, out var dec))
+                        cmp = dec.CompareTo(filterDecimal);
+                    else if (!useDecimal && TryGetDoubleValue(cell, out var dbl))
+                        cmp = dbl.CompareTo(filterDouble);
+                    else
+                        return false;
+                    break;
+                case ColumnKind.DateTime:
+                    if (!hasDateFilter) return false;
+                    if (TryGetDateValue(cell, out var dt))
+                        cmp = dt.CompareTo(filterDate);
+                    else
+                        return false;
+                    break;
+                case ColumnKind.Boolean:
+                    if (!hasBoolFilter) return false;
+                    if (TryGetBoolValue(cell, out var b))
+                        cmp = b.CompareTo(filterBool);
+                    else
+                        return false;
+                    break;
+                default:
+                    cmp = StringComparer.OrdinalIgnoreCase.Compare(cell.ToString() ?? string.Empty, filterString);
+                    break;
+            }
+
+            return direction > 0
+                ? allowEqual ? cmp >= 0 : cmp > 0
+                : allowEqual ? cmp <= 0 : cmp < 0;
+        }
+
+        private static bool EvaluateIn(
+            object? cell,
+            ColumnKind kind,
+            bool useDecimal,
+            HashSet<string>? stringSet,
+            HashSet<double>? doubleSet,
+            HashSet<decimal>? decimalSet,
+            HashSet<DateTime>? dateSet,
+            HashSet<bool>? boolSet)
+        {
+            if (cell is null)
+                return false;
+
+            return kind switch
+            {
+                ColumnKind.Numeric when useDecimal && decimalSet is not null && TryGetDecimalValue(cell, out var dec)
+                    => decimalSet.Contains(dec),
+                ColumnKind.Numeric when !useDecimal && doubleSet is not null && TryGetDoubleValue(cell, out var dbl)
+                    => doubleSet.Contains(dbl),
+                ColumnKind.DateTime when dateSet is not null && TryGetDateValue(cell, out var dt)
+                    => dateSet.Contains(dt),
+                ColumnKind.Boolean when boolSet is not null && TryGetBoolValue(cell, out var b)
+                    => boolSet.Contains(b),
+                _ => stringSet is not null && stringSet.Contains(cell.ToString() ?? string.Empty)
+            };
+        }
+
+        private static bool EvaluateBetween(
+            object? cell,
+            ColumnKind kind,
+            bool useDecimal,
+            bool hasBetween,
+            decimal minDec,
+            decimal maxDec,
+            double minDbl,
+            double maxDbl,
+            DateTime minDate,
+            DateTime maxDate,
+            string? minText,
+            string? maxText,
+            bool minBool,
+            bool maxBool)
+        {
+            if (!hasBetween || cell is null)
+                return false;
+
+            switch (kind)
+            {
+                case ColumnKind.Numeric:
+                    if (useDecimal && TryGetDecimalValue(cell, out var dec))
+                        return dec >= Math.Min(minDec, maxDec) && dec <= Math.Max(minDec, maxDec);
+                    if (!useDecimal && TryGetDoubleValue(cell, out var dbl))
+                        return dbl >= Math.Min(minDbl, maxDbl) && dbl <= Math.Max(minDbl, maxDbl);
+                    return false;
+                case ColumnKind.DateTime:
+                    if (TryGetDateValue(cell, out var dt))
+                    {
+                        var min = minDate <= maxDate ? minDate : maxDate;
+                        var max = minDate <= maxDate ? maxDate : minDate;
+                        return dt >= min && dt <= max;
+                    }
+                    return false;
+                case ColumnKind.Boolean:
+                    if (TryGetBoolValue(cell, out var b))
+                    {
+                        var min = minBool ? 1 : 0;
+                        var max = maxBool ? 1 : 0;
+                        var val = b ? 1 : 0;
+                        return val >= Math.Min(min, max) && val <= Math.Max(min, max);
+                    }
+                    return false;
+                default:
+                    var text = cell.ToString() ?? string.Empty;
+                    var low = minText ?? string.Empty;
+                    var high = maxText ?? string.Empty;
+                    var cmpLow = StringComparer.OrdinalIgnoreCase.Compare(text, low);
+                    var cmpHigh = StringComparer.OrdinalIgnoreCase.Compare(text, high);
+                    if (StringComparer.OrdinalIgnoreCase.Compare(low, high) > 0)
+                        return cmpLow <= 0 && cmpHigh >= 0;
+                    return cmpLow >= 0 && cmpHigh <= 0;
+            }
+        }
+
+        private static int CompareCells(object? a, object? b, ColumnKind kind, bool useDecimal)
+        {
+            if (a is null && b is null) return 0;
+            if (a is null) return 1;
+            if (b is null) return -1;
+
+            switch (kind)
+            {
+                case ColumnKind.Numeric:
+                    if (useDecimal && TryGetDecimalValue(a, out var da) && TryGetDecimalValue(b, out var db))
+                        return da.CompareTo(db);
+                    if (!useDecimal && TryGetDoubleValue(a, out var ad) && TryGetDoubleValue(b, out var bd))
+                        return ad.CompareTo(bd);
+                    break;
+                case ColumnKind.DateTime:
+                    if (TryGetDateValue(a, out var adt) && TryGetDateValue(b, out var bdt))
+                        return adt.CompareTo(bdt);
+                    break;
+                case ColumnKind.Boolean:
+                    if (TryGetBoolValue(a, out var ab) && TryGetBoolValue(b, out var bb))
+                        return ab.CompareTo(bb);
+                    break;
+            }
+
+            return StringComparer.OrdinalIgnoreCase.Compare(a.ToString(), b.ToString());
+        }
+
+        private static List<string> ParseTokens(string? raw)
+        {
+            var tokens = new List<string>();
+            if (string.IsNullOrWhiteSpace(raw))
+                return tokens;
+
+            var trimmed = raw.Trim();
+            if (trimmed.StartsWith("[", StringComparison.Ordinal) && trimmed.EndsWith("]", StringComparison.Ordinal))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(trimmed);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var el in doc.RootElement.EnumerateArray())
+                        {
+                            var token = ElementToString(el);
+                            if (!string.IsNullOrWhiteSpace(token))
+                                tokens.Add(token);
+                        }
+                        return tokens;
+                    }
+                }
+                catch
+                {
+                    // fall through to string split
+                }
+            }
+
+            if (trimmed.Contains("..", StringComparison.Ordinal))
+            {
+                var parts = trimmed.Split(new[] { ".." }, 2, StringSplitOptions.None);
+                tokens.Add(parts[0].Trim());
+                tokens.Add(parts[1].Trim());
+                return tokens;
+            }
+
+            foreach (var part in trimmed.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var token = part.Trim().Trim('"');
+                if (!string.IsNullOrWhiteSpace(token))
+                    tokens.Add(token);
+            }
+
+            return tokens;
+        }
+
+        private static bool TryParseBetweenTokens(string? raw, out string min, out string max)
+        {
+            min = string.Empty;
+            max = string.Empty;
+            var tokens = ParseTokens(raw);
+            if (tokens.Count < 2)
+                return false;
+
+            min = tokens[0];
+            max = tokens[1];
+            return true;
+        }
+
+        private static string? ElementToString(JsonElement el)
+        {
+            return el.ValueKind switch
+            {
+                JsonValueKind.String => el.GetString(),
+                JsonValueKind.Number => el.GetRawText(),
+                JsonValueKind.True => "true",
+                JsonValueKind.False => "false",
+                JsonValueKind.Null => null,
+                _ => el.GetRawText()
+            };
+        }
+
+        private static HashSet<decimal> ToDecimalSet(IEnumerable<string> tokens)
+        {
+            var set = new HashSet<decimal>();
+            foreach (var t in tokens)
+            {
+                if (TryParseDecimal(t, out var d))
+                    set.Add(d);
+            }
+            return set;
+        }
+
+        private static HashSet<double> ToDoubleSet(IEnumerable<string> tokens)
+        {
+            var set = new HashSet<double>();
+            foreach (var t in tokens)
+            {
+                if (TryParseDouble(t, out var d))
+                    set.Add(d);
+            }
+            return set;
+        }
+
+        private static HashSet<DateTime> ToDateSet(IEnumerable<string> tokens)
+        {
+            var set = new HashSet<DateTime>();
+            foreach (var t in tokens)
+            {
+                if (TryParseDate(t, out var d))
+                    set.Add(d);
+            }
+            return set;
+        }
+
+        private static HashSet<bool> ToBoolSet(IEnumerable<string> tokens)
+        {
+            var set = new HashSet<bool>();
+            foreach (var t in tokens)
+            {
+                if (TryParseBool(t, out var b))
+                    set.Add(b);
+            }
+            return set;
+        }
+
+        private static bool TryParseDecimal(string? input, out decimal result)
+        {
+            result = 0m;
+            if (string.IsNullOrWhiteSpace(input))
+                return false;
+
+            return decimal.TryParse(input, NumberStyles.Any, CultureInfo.InvariantCulture, out result)
+                || decimal.TryParse(input, NumberStyles.Any, CultureInfo.CurrentCulture, out result);
+        }
+
+        private static bool TryParseDouble(string? input, out double result)
+        {
+            result = 0d;
+            if (string.IsNullOrWhiteSpace(input))
+                return false;
+
+            return double.TryParse(input, NumberStyles.Any, CultureInfo.InvariantCulture, out result)
+                || double.TryParse(input, NumberStyles.Any, CultureInfo.CurrentCulture, out result);
+        }
+
+        private static bool TryParseDate(string? input, out DateTime result)
+        {
+            result = DateTime.MinValue;
+            if (string.IsNullOrWhiteSpace(input))
+                return false;
+
+            if (DateTime.TryParse(input, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out result))
+                return true;
+
+            if (DateTime.TryParse(input, CultureInfo.CurrentCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out result))
+                return true;
+
+            return false;
+        }
+
+        private static bool TryParseBool(string? input, out bool result)
+        {
+            result = false;
+            if (string.IsNullOrWhiteSpace(input))
+                return false;
+
+            if (bool.TryParse(input, out result))
+                return true;
+
+            if (int.TryParse(input, out var i))
+            {
+                result = i != 0;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryGetDecimalValue(object? value, out decimal result)
+        {
+            if (value is null)
+            {
+                result = 0m;
+                return false;
+            }
+
+            switch (value)
+            {
+                case decimal dec:
+                    result = dec;
+                    return true;
+                case int i:
+                    result = i;
+                    return true;
+                case long l:
+                    result = l;
+                    return true;
+                case double d:
+                    result = (decimal)d;
+                    return true;
+                case float f:
+                    result = (decimal)f;
+                    return true;
+                case string s:
+                    return TryParseDecimal(s, out result);
+            }
+
+            return TryParseDecimal(value.ToString(), out result);
+        }
+
+        private static bool TryGetDoubleValue(object? value, out double result)
+        {
+            if (value is null)
+            {
+                result = 0d;
+                return false;
+            }
+
+            switch (value)
+            {
+                case double d:
+                    result = d;
+                    return true;
+                case float f:
+                    result = f;
+                    return true;
+                case decimal dec:
+                    result = (double)dec;
+                    return true;
+                case int i:
+                    result = i;
+                    return true;
+                case long l:
+                    result = l;
+                    return true;
+                case string s:
+                    return TryParseDouble(s, out result);
+            }
+
+            return TryParseDouble(value.ToString(), out result);
+        }
+
+        private static bool TryGetDateValue(object? value, out DateTime result)
+        {
+            if (value is null)
+            {
+                result = DateTime.MinValue;
+                return false;
+            }
+
+            if (value is DateTime dt)
+            {
+                result = dt.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(dt, DateTimeKind.Utc) : dt.ToUniversalTime();
+                return true;
+            }
+
+            if (value is DateTimeOffset dto)
+            {
+                result = dto.UtcDateTime;
+                return true;
+            }
+
+            if (value is string s)
+                return TryParseDate(s, out result);
+
+            return TryParseDate(value.ToString(), out result);
+        }
+
+        private static bool TryGetBoolValue(object? value, out bool result)
+        {
+            if (value is null)
+            {
+                result = false;
+                return false;
+            }
+
+            switch (value)
+            {
+                case bool b:
+                    result = b;
+                    return true;
+                case string s:
+                    return TryParseBool(s, out result);
+                case int i:
+                    result = i != 0;
+                    return true;
+                case long l:
+                    result = l != 0;
+                    return true;
+            }
+
+            return TryParseBool(value.ToString(), out result);
         }
 
         private sealed class AggState

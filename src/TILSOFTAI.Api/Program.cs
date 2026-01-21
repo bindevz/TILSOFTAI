@@ -62,6 +62,35 @@ builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAnalyticsDatasetStore
     return fallback;
 });
 
+builder.Services.Configure<TILSOFTAI.Infrastructure.Caching.AnalyticsResultCacheOptions>(
+    builder.Configuration.GetSection("AnalyticsResultCache"));
+builder.Services.AddSingleton(sp => sp
+    .GetRequiredService<IOptions<TILSOFTAI.Infrastructure.Caching.AnalyticsResultCacheOptions>>()
+    .Value);
+
+builder.Services.AddSingleton<TILSOFTAI.Infrastructure.Caching.InMemoryAnalysisResultCache>();
+builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAnalyticsResultCache>(sp =>
+{
+    var opt = sp.GetRequiredService<TILSOFTAI.Infrastructure.Caching.AnalyticsResultCacheOptions>();
+    var fallback = sp.GetRequiredService<TILSOFTAI.Infrastructure.Caching.InMemoryAnalysisResultCache>();
+
+    if (string.Equals(opt.Provider, "redis", StringComparison.OrdinalIgnoreCase) &&
+        !string.IsNullOrWhiteSpace(opt.RedisConnection))
+    {
+        try
+        {
+            var mux = ConnectionMultiplexer.Connect(opt.RedisConnection);
+            return new TILSOFTAI.Infrastructure.Caching.RedisAnalysisResultCache(mux, fallback);
+        }
+        catch
+        {
+            return fallback;
+        }
+    }
+
+    return fallback;
+});
+
 // Tool modularity
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.FiltersCatalog.IFilterCatalogRegistry, TILSOFTAI.Orchestration.Tools.FiltersCatalog.FilterCatalogRegistry>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.Modularity.IFilterCanonicalizer, TILSOFTAI.Orchestration.Tools.Modularity.FilterCanonicalizer>();

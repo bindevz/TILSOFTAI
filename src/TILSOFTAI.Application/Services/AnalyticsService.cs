@@ -1,9 +1,12 @@
 using Microsoft.Data.Analysis;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using TILSOFTAI.Analytics;
 using TILSOFTAI.Application.Analytics;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Domain.ValueObjects;
+using TILSOFTAI.Infrastructure.Caching;
 
 namespace TILSOFTAI.Application.Services;
 
@@ -24,11 +27,15 @@ public sealed class AnalyticsService
     private readonly IAnalyticsDatasetStore _datasetStore;
     private readonly IAuditLogger _auditLogger;
     private readonly AtomicDataEngine _engine;
+    private readonly IAnalyticsResultCache? _resultCache;
+    private readonly TimeSpan _resultCacheTtl;
 
     public AnalyticsService(
         IEnumerable<IAnalyticsDataSource> sources,
         IAnalyticsDatasetStore datasetStore,
-        IAuditLogger auditLogger)
+        IAuditLogger auditLogger,
+        IAnalyticsResultCache? resultCache = null,
+        AnalyticsResultCacheOptions? resultCacheOptions = null)
     {
         _sources = (sources ?? throw new ArgumentNullException(nameof(sources)))
             .GroupBy(s => s.SourceName, StringComparer.OrdinalIgnoreCase)
@@ -36,6 +43,8 @@ public sealed class AnalyticsService
 
         _datasetStore = datasetStore;
         _auditLogger = auditLogger;
+        _resultCache = resultCache;
+        _resultCacheTtl = ResolveResultCacheTtl(resultCacheOptions);
         _engine = new AtomicDataEngine();
     }
 
@@ -147,7 +156,8 @@ public sealed class AnalyticsService
         JsonElement pipeline,
         RunBounds bounds,
         TSExecutionContext context,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool persistResult = false)
     {
         if (string.IsNullOrWhiteSpace(datasetId)) throw new ArgumentException("datasetId is required.");
         bounds = bounds.WithDefaults();
@@ -160,6 +170,11 @@ public sealed class AnalyticsService
             throw new InvalidOperationException(resolveError ?? "Dataset not found or expired.");
         }
 
+        var useCache = !persistResult && _resultCache is not null;
+        var cacheKey = useCache ? BuildCacheKey(datasetId, pipeline, bounds) : string.Empty;
+        if (useCache && _resultCache!.TryGet(cacheKey, out var cached) && cached is RunResult cachedResult)
+            return cachedResult;
+
         DataFrame? ResolveDataset(string rightId)
         {
             if (TryResolveDataset(rightId, context, out var resolved, out _))
@@ -167,7 +182,13 @@ public sealed class AnalyticsService
             return null;
         }
 
-        var result = Summarize(dataset.Data, pipeline, bounds, datasetId, ResolveDataset);
+        var result = SummarizeInternal(dataset.Data, pipeline, bounds, datasetId, ResolveDataset, out var resultFrame);
+
+        if (persistResult)
+        {
+            var resultDatasetId = await PersistResultDatasetAsync(resultFrame, result.Schema, context, cancellationToken);
+            result = result with { ResultDatasetId = resultDatasetId };
+        }
 
         await _auditLogger.LogToolExecutionAsync(
             context,
@@ -175,6 +196,9 @@ public sealed class AnalyticsService
             new { datasetId, bounds },
             new { result.RowCount, result.ColumnCount },
             cancellationToken);
+
+        if (useCache)
+            await _resultCache!.StoreAsync(cacheKey, result, _resultCacheTtl, cancellationToken);
 
         return result;
     }
@@ -204,31 +228,7 @@ public sealed class AnalyticsService
         string datasetIdForTrace = "",
         Func<string, DataFrame?>? datasetResolver = null)
     {
-        if (dataset is null) throw new ArgumentNullException(nameof(dataset));
-        bounds = bounds.WithDefaults();
-
-        var engineBounds = new AtomicDataEngine.EngineBounds(
-            bounds.TopN,
-            bounds.MaxGroups,
-            bounds.MaxJoinRows,
-            bounds.MaxJoinMatchesPerLeft,
-            bounds.MaxColumns,
-            bounds.MaxResultRows);
-
-        var resolver = datasetResolver ?? (_ => null);
-        var engineResult = _engine.Execute(dataset, pipeline, engineBounds, resolver);
-
-        var df = engineResult.Data;
-        var schema = DescribeSchema(df);
-        var rows = BuildRows(df, bounds.MaxResultRows);
-
-        return new RunResult(
-            DatasetId: datasetIdForTrace,
-            RowCount: rows.Count,
-            ColumnCount: schema.Count,
-            Schema: schema,
-            Rows: rows,
-            Warnings: engineResult.Warnings);
+        return SummarizeInternal(dataset, pipeline, bounds, datasetIdForTrace, datasetResolver, out _);
     }
 
     // ------------------------
@@ -292,6 +292,88 @@ public sealed class AnalyticsService
         return true;
     }
 
+    private RunResult SummarizeInternal(
+        DataFrame dataset,
+        JsonElement pipeline,
+        RunBounds bounds,
+        string datasetIdForTrace,
+        Func<string, DataFrame?>? datasetResolver,
+        out DataFrame resultFrame)
+    {
+        if (dataset is null) throw new ArgumentNullException(nameof(dataset));
+        bounds = bounds.WithDefaults();
+
+        var engineBounds = new AtomicDataEngine.EngineBounds(
+            bounds.TopN,
+            bounds.MaxGroups,
+            bounds.MaxJoinRows,
+            bounds.MaxJoinMatchesPerLeft,
+            bounds.MaxColumns,
+            bounds.MaxResultRows);
+
+        var resolver = datasetResolver ?? (_ => null);
+        var engineResult = _engine.Execute(dataset, pipeline, engineBounds, resolver);
+
+        resultFrame = engineResult.Data;
+        var schema = DescribeSchema(resultFrame);
+        var rows = BuildRows(resultFrame, bounds.MaxResultRows);
+
+        return new RunResult(
+            DatasetId: datasetIdForTrace,
+            RowCount: rows.Count,
+            ColumnCount: schema.Count,
+            Schema: schema,
+            Rows: rows,
+            Warnings: engineResult.Warnings);
+    }
+
+    private async Task<string> PersistResultDatasetAsync(
+        DataFrame df,
+        IReadOnlyList<AnalyticsColumn> schema,
+        TSExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        var datasetId = Guid.NewGuid().ToString("N");
+        var dataset = new AnalyticsDataset(
+            DatasetId: datasetId,
+            Source: "analytics.result",
+            TenantId: context.TenantId,
+            UserId: context.UserId,
+            CreatedAtUtc: DateTimeOffset.UtcNow,
+            Data: df,
+            Schema: schema,
+            SchemaDigest: null);
+
+        await _datasetStore.StoreAsync(datasetId, dataset, DefaultDatasetTtl, cancellationToken);
+        return datasetId;
+    }
+
+    private static TimeSpan ResolveResultCacheTtl(AnalyticsResultCacheOptions? options)
+    {
+        if (options is null || options.TtlMinutes <= 0)
+            return TimeSpan.FromMinutes(10);
+
+        var minutes = Math.Clamp(options.TtlMinutes, 5, 10);
+        return TimeSpan.FromMinutes(minutes);
+    }
+
+    private static string BuildCacheKey(string datasetId, JsonElement pipeline, RunBounds bounds)
+    {
+        var raw = pipeline.GetRawText();
+        var input = string.Join("|", datasetId,
+            bounds.TopN,
+            bounds.MaxGroups,
+            bounds.MaxResultRows,
+            bounds.MaxJoinRows,
+            bounds.MaxJoinMatchesPerLeft,
+            bounds.MaxColumns,
+            raw);
+
+        var bytes = Encoding.UTF8.GetBytes(input);
+        var hash = SHA256.HashData(bytes);
+        return Convert.ToHexString(hash);
+    }
+
     // ------------------------
     // Models
     // ------------------------
@@ -348,5 +430,6 @@ public sealed class AnalyticsService
         int ColumnCount,
         IReadOnlyList<AnalyticsColumn> Schema,
         IReadOnlyList<object?[]> Rows,
-        IReadOnlyList<string> Warnings);
+        IReadOnlyList<string> Warnings,
+        string? ResultDatasetId = null);
 }

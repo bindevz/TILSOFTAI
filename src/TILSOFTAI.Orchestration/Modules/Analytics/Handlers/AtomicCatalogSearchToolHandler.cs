@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 using TILSOFTAI.Application.Services;
 using TILSOFTAI.Domain.ValueObjects;
@@ -48,7 +49,9 @@ public sealed class AtomicCatalogSearchToolHandler : IToolHandler
                 description_en = p.DescriptionEn,
                 @default = p.DefaultValue,
                 example = p.Example
-            })
+            }),
+            examples = ToBoundedJsonOrString(h.ExampleJson, maxStringLength: 2000),
+            schemaHints = ToBoundedJsonOrString(h.SchemaHintsJson, maxStringLength: 2000)
         });
 
         var warnings = new List<string>();
@@ -84,7 +87,8 @@ public sealed class AtomicCatalogSearchToolHandler : IToolHandler
             // Avoid overload ambiguity: Score is int and can convert to both double/decimal.
             score = Math.Round((double)h.Score, 4),
             domain = h.Domain,
-            entity = h.Entity
+            entity = h.Entity,
+            schemaHints = ToBoundedJsonOrString(h.SchemaHintsJson, maxStringLength: 1000)
         });
 
         evidence.Add(new EnvelopeEvidenceItemV1
@@ -100,5 +104,91 @@ public sealed class AtomicCatalogSearchToolHandler : IToolHandler
             Evidence: evidence);
 
         return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateSuccess("atomic.catalog.search executed", payload), extras);
+    }
+
+    private static object? ToBoundedJsonOrString(string? json, int maxStringLength)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return null;
+
+        var node = TryParseBoundedJson(json, maxDepth: 4, maxArrayElements: 10, maxStringLength: 400);
+        if (node is not null)
+            return node;
+
+        return json.Length <= maxStringLength ? json : json.Substring(0, maxStringLength) + "...";
+    }
+
+    private static JsonNode? TryParseBoundedJson(string json, int maxDepth, int maxArrayElements, int maxStringLength)
+    {
+        try
+        {
+            var node = JsonNode.Parse(json);
+            if (node is null) return null;
+            var truncated = false;
+            return PruneNode(node, 0, maxDepth, maxArrayElements, maxStringLength, ref truncated);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static JsonNode PruneNode(JsonNode node, int depth, int maxDepth, int maxArrayElements, int maxStringLength, ref bool truncated)
+    {
+        if (depth >= maxDepth)
+        {
+            truncated = true;
+            return JsonValue.Create("[truncated]")!;
+        }
+
+        if (node is JsonValue value)
+        {
+            if (value.TryGetValue<string>(out var s))
+            {
+                if (s.Length > maxStringLength)
+                {
+                    truncated = true;
+                    s = s.Substring(0, maxStringLength) + "...";
+                }
+                return JsonValue.Create(s)!;
+            }
+
+            return value.DeepClone();
+        }
+
+        if (node is JsonArray arr)
+        {
+            var result = new JsonArray();
+            var take = Math.Min(arr.Count, maxArrayElements);
+            for (var i = 0; i < take; i++)
+            {
+                if (arr[i] is null)
+                {
+                    result.Add(null);
+                    continue;
+                }
+                result.Add(PruneNode(arr[i]!, depth + 1, maxDepth, maxArrayElements, maxStringLength, ref truncated));
+            }
+            if (arr.Count > maxArrayElements)
+                truncated = true;
+            return result;
+        }
+
+        if (node is JsonObject obj)
+        {
+            var result = new JsonObject();
+            foreach (var kv in obj)
+            {
+                if (kv.Value is null)
+                {
+                    result[kv.Key] = null;
+                    continue;
+                }
+                result[kv.Key] = PruneNode(kv.Value, depth + 1, maxDepth, maxArrayElements, maxStringLength, ref truncated);
+            }
+            return result;
+        }
+
+        return node.DeepClone();
     }
 }

@@ -30,4 +30,5 @@ public sealed record AtomicCatalogSearchHit(
     string? Tags,
     int Score,
     string? ParamsJson,
-    string? ExampleJson);
+    string? ExampleJson,
+    string? SchemaHintsJson);

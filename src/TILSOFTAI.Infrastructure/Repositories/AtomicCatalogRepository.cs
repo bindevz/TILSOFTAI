@@ -84,7 +84,8 @@ ORDER BY Score DESC, UpdatedAtUtc DESC;";
                     Tags: GetString(reader, "Tags"),
                     Score: GetInt(reader, "Score") ?? 1,
                     ParamsJson: GetString(reader, "ParamsJson"),
-                    ExampleJson: GetString(reader, "ExampleJson")));
+                    ExampleJson: GetString(reader, "ExampleJson"),
+                    SchemaHintsJson: GetString(reader, "SchemaHintsJson")));
             }
         }
 
@@ -161,7 +162,8 @@ ORDER BY p.modify_date DESC;";
                 Tags: null,
                 Score: 1,
                 ParamsJson: null,
-                ExampleJson: null));
+                ExampleJson: null,
+                SchemaHintsJson: null));
         }
 
         return list;
