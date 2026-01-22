@@ -1,3 +1,4 @@
+﻿using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -18,11 +19,16 @@ public sealed class ToolResultCompactor
     };
 
     public static string CompactEnvelopeJson(string envelopeJson, int maxBytes = DefaultMaxBytes)
+        => CompactEnvelopeJsonWithMetadata(envelopeJson, maxBytes).Json;
+
+    public static ToolCompactionResult CompactEnvelopeJsonWithMetadata(string envelopeJson, int maxBytes = DefaultMaxBytes)
     {
         maxBytes = Math.Clamp(maxBytes, 1000, 200000);
 
+        var droppedFields = new List<string>();
+
         if (string.IsNullOrWhiteSpace(envelopeJson))
-            return BuildMinimalEnvelope(null, note: "empty", maxBytes);
+            return BuildMinimalEnvelopeResult(null, note: "empty", maxBytes, droppedFields);
 
         JsonNode? root;
         try
@@ -31,17 +37,20 @@ public sealed class ToolResultCompactor
         }
         catch
         {
-            return BuildMinimalEnvelope(null, note: "invalid_json", maxBytes);
+            return BuildMinimalEnvelopeResult(null, note: "invalid_json", maxBytes, droppedFields);
         }
 
         if (root is not JsonObject obj)
-            return BuildMinimalEnvelope(null, note: "invalid_root", maxBytes);
+            return BuildMinimalEnvelopeResult(null, note: "invalid_root", maxBytes, droppedFields);
 
         var compacted = false;
         var truncated = false;
 
         if (obj.Remove("data"))
+        {
             compacted = true;
+            droppedFields.Add("data");
+        }
 
         if (obj.TryGetPropertyValue("evidence", out var evidenceNode) && evidenceNode is not null)
         {
@@ -55,28 +64,106 @@ public sealed class ToolResultCompactor
         if (truncated)
             obj["truncated"] = true;
 
+        var compaction = new JsonObject
+        {
+            ["truncated"] = truncated,
+            ["droppedFields"] = new JsonArray(droppedFields.Select(d => JsonValue.Create(d)).ToArray())
+        };
+        obj["compaction"] = compaction;
+
         var json = obj.ToJsonString(Json);
         if (GetByteCount(json) <= maxBytes)
-            return json;
+            return FinalizeCompaction(obj, compaction, droppedFields, truncated, json, maxBytes);
 
         truncated = true;
         obj["truncated"] = true;
         obj["compacted"] = true;
 
         if (obj.ContainsKey("evidence"))
+        {
             obj["evidence"] = new JsonArray();
+            if (!droppedFields.Contains("evidence"))
+                droppedFields.Add("evidence");
+        }
+
+        compaction["truncated"] = true;
+        compaction["droppedFields"] = new JsonArray(droppedFields.Select(d => JsonValue.Create(d)).ToArray());
 
         json = obj.ToJsonString(Json);
         if (GetByteCount(json) <= maxBytes)
-            return json;
+            return FinalizeCompaction(obj, compaction, droppedFields, true, json, maxBytes);
 
-        return BuildMinimalEnvelope(obj, note: "max_bytes", maxBytes);
+        return BuildMinimalEnvelopeResult(obj, note: "max_bytes", maxBytes, droppedFields);
     }
 
     public static string CompactEnvelope(EnvelopeV1 env, int maxBytes = DefaultMaxBytes)
+        => CompactEnvelopeWithMetadata(env, maxBytes).Json;
+
+    public static ToolCompactionResult CompactEnvelopeWithMetadata(EnvelopeV1 env, int maxBytes = DefaultMaxBytes)
     {
         var json = JsonSerializer.Serialize(env, Json);
-        return CompactEnvelopeJson(json, maxBytes);
+        return CompactEnvelopeJsonWithMetadata(json, maxBytes);
+    }
+
+    private static ToolCompactionResult FinalizeCompaction(
+        JsonObject obj,
+        JsonObject compaction,
+        IReadOnlyList<string> droppedFields,
+        bool truncated,
+        string jsonWithoutHash,
+        int maxBytes)
+    {
+        var hash = ComputeSha256(jsonWithoutHash);
+        compaction["outputHash"] = hash;
+
+        var finalJson = obj.ToJsonString(Json);
+        if (GetByteCount(finalJson) > maxBytes)
+            return BuildMinimalEnvelopeResult(obj, note: "max_bytes", maxBytes, droppedFields);
+
+        return new ToolCompactionResult(finalJson, truncated, droppedFields, hash, GetByteCount(finalJson));
+    }
+
+    private static ToolCompactionResult BuildMinimalEnvelopeResult(
+        JsonObject? source,
+        string note,
+        int maxBytes,
+        IReadOnlyList<string> droppedFields)
+    {
+        var minimal = new JsonObject
+        {
+            ["compacted"] = true,
+            ["truncated"] = true,
+            ["note"] = note
+        };
+
+        if (source is not null)
+        {
+            if (source.TryGetPropertyValue("tool", out var tool))
+                minimal["tool"] = tool?.DeepClone();
+            if (source.TryGetPropertyValue("ok", out var ok))
+                minimal["ok"] = ok?.DeepClone();
+            if (source.TryGetPropertyValue("message", out var msg) && msg is JsonValue msgVal && msgVal.TryGetValue<string>(out var s))
+                minimal["message"] = TruncateString(s, 200);
+        }
+
+        var compaction = new JsonObject
+        {
+            ["truncated"] = true,
+            ["droppedFields"] = new JsonArray(droppedFields.Select(d => JsonValue.Create(d)).ToArray())
+        };
+        minimal["compaction"] = compaction;
+
+        var jsonWithoutHash = minimal.ToJsonString(Json);
+        var hash = ComputeSha256(jsonWithoutHash);
+        compaction["outputHash"] = hash;
+
+        var json = minimal.ToJsonString(Json);
+        if (GetByteCount(json) <= maxBytes)
+            return new ToolCompactionResult(json, true, droppedFields, hash, GetByteCount(json));
+
+        var fallback = "{\"compacted\":true,\"truncated\":true}";
+        var fallbackHash = ComputeSha256(fallback);
+        return new ToolCompactionResult(fallback, true, droppedFields, fallbackHash, GetByteCount(fallback));
     }
 
     private static JsonNode PruneNode(JsonNode node, int depth, ref bool truncated)
@@ -138,32 +225,6 @@ public sealed class ToolResultCompactor
         return node.DeepClone();
     }
 
-    private static string BuildMinimalEnvelope(JsonObject? source, string note, int maxBytes)
-    {
-        var minimal = new JsonObject
-        {
-            ["compacted"] = true,
-            ["truncated"] = true,
-            ["note"] = note
-        };
-
-        if (source is not null)
-        {
-            if (source.TryGetPropertyValue("tool", out var tool))
-                minimal["tool"] = tool?.DeepClone();
-            if (source.TryGetPropertyValue("ok", out var ok))
-                minimal["ok"] = ok?.DeepClone();
-            if (source.TryGetPropertyValue("message", out var msg) && msg is JsonValue msgVal && msgVal.TryGetValue<string>(out var s))
-                minimal["message"] = TruncateString(s, 200);
-        }
-
-        var json = minimal.ToJsonString(Json);
-        if (GetByteCount(json) <= maxBytes)
-            return json;
-
-        return "{\"compacted\":true,\"truncated\":true}";
-    }
-
     private static string TruncateString(string input, int max)
     {
         if (string.IsNullOrEmpty(input)) return string.Empty;
@@ -171,4 +232,18 @@ public sealed class ToolResultCompactor
     }
 
     private static int GetByteCount(string text) => Encoding.UTF8.GetByteCount(text);
+
+    private static string ComputeSha256(string text)
+    {
+        var bytes = Encoding.UTF8.GetBytes(text);
+        var hash = SHA256.HashData(bytes);
+        return Convert.ToHexString(hash);
+    }
 }
+
+public sealed record ToolCompactionResult(
+    string Json,
+    bool Truncated,
+    IReadOnlyList<string> DroppedFields,
+    string OutputHash,
+    int Bytes);

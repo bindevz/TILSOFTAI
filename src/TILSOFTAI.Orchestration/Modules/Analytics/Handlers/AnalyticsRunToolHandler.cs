@@ -58,7 +58,8 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
             return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateFailure("analytics.run failed", errorPayload));
         }
 
-        var previewRows = result.Rows.Take(50).ToArray();
+        const int previewRowLimit = 20;
+        var previewRows = result.Rows.Take(previewRowLimit).ToArray();
         var payloadEvidence = new
         {
             summarySchema = new
@@ -91,7 +92,7 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
             evidence = payloadEvidence
         };
 
-        _ctxAccessor.LastInsightPreviewMarkdown = MarkdownTableRenderer.Render(new AnalyticsSchema(result.Schema), result.Rows);
+        _ctxAccessor.LastInsightPreviewMarkdown = MarkdownTableRenderer.Render(new AnalyticsSchema(result.Schema), previewRows);
 
         var evidence = new List<EnvelopeEvidenceItemV1>
         {

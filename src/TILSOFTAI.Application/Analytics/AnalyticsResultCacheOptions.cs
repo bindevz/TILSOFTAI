@@ -1,4 +1,4 @@
-namespace TILSOFTAI.Infrastructure.Caching;
+namespace TILSOFTAI.Application.Analytics;
 
 public sealed class AnalyticsResultCacheOptions
 {

@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\TILSOFTAI.Domain\TILSOFTAI.Domain.csproj" />
+    <ProjectReference Include="..\TILSOFTAI.Application\TILSOFTAI.Application.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.0" />

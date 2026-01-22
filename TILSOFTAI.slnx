@@ -7,4 +7,7 @@
     <Project Path="src/TILSOFTAI.Infrastructure/TILSOFTAI.Infrastructure.csproj" />
     <Project Path="src/TILSOFTAI.Orchestration/TILSOFTAI.Orchestration.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TILSOFTAI.Orchestration.Tests/TILSOFTAI.Orchestration.Tests.csproj" />
+  </Folder>
 </Solution>

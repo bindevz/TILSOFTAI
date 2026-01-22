@@ -6,7 +6,6 @@ using TILSOFTAI.Analytics;
 using TILSOFTAI.Application.Analytics;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Domain.ValueObjects;
-using TILSOFTAI.Infrastructure.Caching;
 
 namespace TILSOFTAI.Application.Services;
 
@@ -70,7 +69,9 @@ public sealed class AnalyticsService
         var datasetId = Guid.NewGuid().ToString("N");
         var schema = DescribeSchema(df);
         var schemaDigest = schemaDigestFactory?.Invoke(datasetId);
-        var dataset = new AnalyticsDataset(datasetId, source, context.TenantId, context.UserId, DateTimeOffset.UtcNow, df, schema, schemaDigest);
+        var createdAtUtc = DateTimeOffset.UtcNow;
+        var tabular = ToTabularData(df);
+        var dataset = new AnalyticsDatasetDto(datasetId, schemaDigest, tabular, context.TenantId, context.UserId, createdAtUtc);
         await _datasetStore.StoreAsync(datasetId, dataset, DefaultDatasetTtl, cancellationToken);
         var preview = BuildPreview(df, bounds.PreviewRows);
 
@@ -81,7 +82,7 @@ public sealed class AnalyticsService
             ColumnCount: df.Columns.Count,
             Schema: schema,
             Preview: preview,
-            ExpiresAtUtc: dataset.CreatedAtUtc.Add(DefaultDatasetTtl));
+            ExpiresAtUtc: createdAtUtc.Add(DefaultDatasetTtl));
 
         await _auditLogger.LogToolExecutionAsync(
             context,
@@ -118,15 +119,14 @@ public sealed class AnalyticsService
         var datasetId = Guid.NewGuid().ToString("N");
         var schema = DescribeSchema(df);
         var schemaDigest = schemaDigestFactory?.Invoke(datasetId);
-        var dataset = new AnalyticsDataset(
+        var createdAtUtc = DateTimeOffset.UtcNow;
+        var dataset = new AnalyticsDatasetDto(
             DatasetId: datasetId,
-            Source: source,
+            SchemaDigest: schemaDigest,
+            TabularData: tabular,
             TenantId: context.TenantId,
             UserId: context.UserId,
-            CreatedAtUtc: DateTimeOffset.UtcNow,
-            Data: df,
-            Schema: schema,
-            SchemaDigest: schemaDigest);
+            CreatedAtUtc: createdAtUtc);
 
         await _datasetStore.StoreAsync(datasetId, dataset, DefaultDatasetTtl, cancellationToken);
         var previewRows = bounds.PreviewRows <= 0 ? 0 : Math.Min(bounds.PreviewRows, tabular.Rows.Count);
@@ -139,7 +139,7 @@ public sealed class AnalyticsService
             ColumnCount: tabular.Columns.Count,
             Schema: schema,
             Preview: preview,
-            ExpiresAtUtc: dataset.CreatedAtUtc.Add(DefaultDatasetTtl));
+            ExpiresAtUtc: createdAtUtc.Add(DefaultDatasetTtl));
 
         await _auditLogger.LogToolExecutionAsync(
             context,
@@ -270,12 +270,37 @@ public sealed class AnalyticsService
         return rows;
     }
 
-    private bool TryResolveDataset(string datasetId, TSExecutionContext context, out AnalyticsDataset dataset, out string? error)
+    private static TabularData ToTabularData(DataFrame df)
+    {
+        var columns = new List<TabularColumn>(df.Columns.Count);
+        foreach (var c in df.Columns)
+        {
+            columns.Add(new TabularColumn(c.Name, MapTabularType(c.DataType)));
+        }
+
+        var rowCount = (int)Math.Min(df.Rows.Count, int.MaxValue);
+        var rows = BuildRows(df, rowCount);
+        return new TabularData(columns, rows, rowCount);
+    }
+
+    private static TabularType MapTabularType(Type type)
+    {
+        var t = Nullable.GetUnderlyingType(type) ?? type;
+        if (t == typeof(int)) return TabularType.Int32;
+        if (t == typeof(long)) return TabularType.Int64;
+        if (t == typeof(double) || t == typeof(float)) return TabularType.Double;
+        if (t == typeof(decimal)) return TabularType.Decimal;
+        if (t == typeof(bool)) return TabularType.Boolean;
+        if (t == typeof(DateTime) || t == typeof(DateTimeOffset)) return TabularType.DateTime;
+        return TabularType.String;
+    }
+
+    private bool TryResolveDataset(string datasetId, TSExecutionContext context, out ResolvedDataset dataset, out string? error)
     {
         error = null;
         dataset = null!;
 
-        if (!_datasetStore.TryGet(datasetId, out var obj) || obj is not AnalyticsDataset stored)
+        if (!_datasetStore.TryGet(datasetId, out var obj) || obj is not AnalyticsDatasetDto stored)
         {
             error = "Dataset not found or expired.";
             return false;
@@ -288,7 +313,16 @@ public sealed class AnalyticsService
             return false;
         }
 
-        dataset = stored;
+        var df = TabularDataFrameBuilder.Build(stored.TabularData);
+        var schema = DescribeSchema(df);
+        dataset = new ResolvedDataset(
+            DatasetId: stored.DatasetId,
+            TenantId: stored.TenantId,
+            UserId: stored.UserId,
+            CreatedAtUtc: stored.CreatedAtUtc,
+            Data: df,
+            Schema: schema,
+            SchemaDigest: stored.SchemaDigest);
         return true;
     }
 
@@ -334,15 +368,15 @@ public sealed class AnalyticsService
         CancellationToken cancellationToken)
     {
         var datasetId = Guid.NewGuid().ToString("N");
-        var dataset = new AnalyticsDataset(
+        var createdAtUtc = DateTimeOffset.UtcNow;
+        var tabular = ToTabularData(df);
+        var dataset = new AnalyticsDatasetDto(
             DatasetId: datasetId,
-            Source: "analytics.result",
+            SchemaDigest: null,
+            TabularData: tabular,
             TenantId: context.TenantId,
             UserId: context.UserId,
-            CreatedAtUtc: DateTimeOffset.UtcNow,
-            Data: df,
-            Schema: schema,
-            SchemaDigest: null);
+            CreatedAtUtc: createdAtUtc);
 
         await _datasetStore.StoreAsync(datasetId, dataset, DefaultDatasetTtl, cancellationToken);
         return datasetId;
@@ -405,9 +439,8 @@ public sealed class AnalyticsService
 
     public sealed record AnalyticsColumn(string Name, string DataType, string DisplayName);
 
-    internal sealed record AnalyticsDataset(
+    private sealed record ResolvedDataset(
         string DatasetId,
-        string Source,
         string TenantId,
         string UserId,
         DateTimeOffset CreatedAtUtc,

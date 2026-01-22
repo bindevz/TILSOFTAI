@@ -1,6 +1,7 @@
 using Microsoft.SemanticKernel;
 using System.ComponentModel;
 using System.Text.Json;
+using TILSOFTAI.Orchestration.Tools;
 
 namespace TILSOFTAI.Orchestration.SK.Plugins;
 
@@ -22,7 +23,7 @@ public sealed class AnalyticsToolsPlugin
         int maxResultRows = 500,
         bool persistResult = false,
         CancellationToken ct = default)
-        => _invoker.ExecuteAsync("analytics.run", new { datasetId, pipeline, topN, maxGroups, maxResultRows, persistResult }, ct);
+        => _invoker.ExecuteAsync("analytics.run", new { datasetId, pipeline, topN, maxGroups, maxResultRows, persistResult }, ToolExposurePolicy.ModeBAllowedTools, ct);
 
     [KernelFunction("atomic_catalog_search")]
     [Description("Tìm stored procedure phù hợp trong catalog (full-text). RULE: Nếu không chắc spName, hãy gọi tool này trước rồi mới gọi atomic_query_execute.")]
@@ -31,7 +32,7 @@ public sealed class AnalyticsToolsPlugin
         string query,
         int topK = 5,
         CancellationToken ct = default)
-        => _invoker.ExecuteAsync("atomic.catalog.search", new { query, topK }, ct);
+        => _invoker.ExecuteAsync("atomic.catalog.search", new { query, topK }, ToolExposurePolicy.ModeBAllowedTools, ct);
 
     [KernelFunction("atomic_query_execute")]
     [Description("Thực thi stored procedure theo chuẩn AtomicQuery (RS0 schema, RS1 summary, RS2..N data tables). Tự routing theo RS0.delivery/tableKind: trả displayTables và/hoặc engineDatasets (datasetId) cho Atomic Data Engine. Nếu không chắc spName, hãy gọi atomic_catalog_search trước.")]
@@ -59,6 +60,6 @@ public sealed class AnalyticsToolsPlugin
             maxColumns,
             maxDisplayRows,
             previewRows
-        }, ct);
+        }, ToolExposurePolicy.ModeBAllowedTools, ct);
 }
 

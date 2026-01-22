@@ -34,6 +34,7 @@ public sealed class AnalyticsToolInputSpecProvider : IToolInputSpecProvider
 
         spec.Args["spName"] = new ToolArgSpec("spName", ToolArgType.String, Required: true);
         spec.Args["params"] = new ToolArgSpec("params", ToolArgType.Json, Required: false, Default: null);
+        spec.Args["reusePreviousFilters"] = new ToolArgSpec("reusePreviousFilters", ToolArgType.Bool, Required: false, Default: false);
 
         spec.Args["maxRowsPerTable"] = new ToolArgSpec("maxRowsPerTable", ToolArgType.Int, Required: false, Default: 20000, MinInt: 1, MaxInt: 200000);
         spec.Args["maxRowsSummary"] = new ToolArgSpec("maxRowsSummary", ToolArgType.Int, Required: false, Default: 500, MinInt: 0, MaxInt: 50000);

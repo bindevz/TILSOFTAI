@@ -10,6 +10,7 @@ using TILSOFTAI.Orchestration.Llm.OpenAi;
 using TILSOFTAI.Orchestration.Formatting;
 using TILSOFTAI.Orchestration.SK;
 using TILSOFTAI.Orchestration.SK.Conversation;
+using TILSOFTAI.Orchestration.Tools;
 
 namespace TILSOFTAI.Orchestration.Chat;
 
@@ -41,13 +42,8 @@ public sealed class ChatPipeline
     private readonly ILogger<ChatPipeline> _logger;
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
 
-    // Tool list exposed to LLM for this Orchestrator.
-    private static readonly string[] ExposedTools =
-    [
-        "atomic.catalog.search",
-        "atomic.query.execute",
-        "analytics.run"
-    ];
+    // Tool allowlist exposed to LLM for this Orchestrator (single source of truth).
+    private static readonly IReadOnlySet<string> ExposedTools = ToolExposurePolicy.ModeBAllowedTools;
 
     public ChatPipeline(
         OpenAiChatClient chat,
@@ -260,7 +256,7 @@ public sealed class ChatPipeline
                     argsElement = doc.RootElement.Clone();
                 }
 
-                var toolResult = await _toolInvoker.ExecuteAsync(toolName, argsElement, cancellationToken);
+                var toolResult = await _toolInvoker.ExecuteAsync(toolName, argsElement, ExposedTools, cancellationToken);
                 var toolResultJson = JsonSerializer.Serialize(toolResult, _json);
 
                 TryCaptureToolArtifacts(toolResultJson);

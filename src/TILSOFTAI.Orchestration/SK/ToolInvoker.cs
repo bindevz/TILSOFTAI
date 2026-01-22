@@ -3,6 +3,8 @@ using Microsoft.Extensions.Logging;
 using System.Security;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using TILSOFTAI.Orchestration;
+using TILSOFTAI.Orchestration.Chat;
 using TILSOFTAI.Application.Permissions;
 using TILSOFTAI.Orchestration.Contracts;
 using TILSOFTAI.Orchestration.Contracts.Evidence;
@@ -21,6 +23,7 @@ public sealed class ToolInvoker
     private readonly ToolDispatcher _dispatcher;
     private readonly RbacService _rbac;
     private readonly ExecutionContextAccessor _ctx;
+    private readonly OrchestrationOptions _options;
     private readonly IConversationStateStore _conversationState;
     private readonly IFilterPatchMerger _filterPatchMerger;
     private readonly IResponseSchemaValidator _responseSchemaValidator;
@@ -31,6 +34,7 @@ public sealed class ToolInvoker
         ToolDispatcher dispatcher,
         RbacService rbac,
         ExecutionContextAccessor ctx,
+        OrchestrationOptions options,
         IConversationStateStore conversationState,
         IFilterPatchMerger filterPatchMerger,
         IResponseSchemaValidator responseSchemaValidator,
@@ -40,24 +44,20 @@ public sealed class ToolInvoker
         _dispatcher = dispatcher;
         _rbac = rbac;
         _ctx = ctx;
+        _options = options;
         _conversationState = conversationState;
         _filterPatchMerger = filterPatchMerger;
         _responseSchemaValidator = responseSchemaValidator;
         _logger = logger;
     }
 
-    public async Task<object> ExecuteAsync(string toolName, object argsObj, CancellationToken ct)
+    public async Task<object> ExecuteAsync(string toolName, object argsObj, IReadOnlySet<string> allowedToolNames, CancellationToken ct)
     {
         // IMPORTANT: Do not throw for expected errors (validation/forbidden/contract).
         // Returning a structured envelope keeps the LLM from retrying the same tool call.
 
         using var doc = JsonDocument.Parse(JsonSerializer.Serialize(argsObj, _json));
         var args = doc.RootElement.Clone();
-
-        // Conversation-aware filter patching (ver19)
-        // If the model only specifies delta filters for a follow-up turn, merge with the
-        // last successful query's canonical filters.
-        args = await MergeConversationFiltersIfNeededAsync(toolName, args, ct);
 
         var sw = Stopwatch.StartNew();
 
@@ -79,27 +79,62 @@ public sealed class ToolInvoker
         object? lastPayload = null;
         try
         {
+            if (allowedToolNames is null || !allowedToolNames.Contains(toolName))
+            {
+                var notAllowed = new
+                {
+                    Success = false,
+                    Error = "TOOL_NOT_ALLOWED",
+                    Details = "Tool is not exposed in this pipeline."
+                };
+
+                policy = EnvelopePolicyV1.Deny(_ctx.Context, "TOOL_NOT_ALLOWED");
+                _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code=TOOL_NOT_ALLOWED ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
+                return LogAndReturn(EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
+                    telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
+                    policy: policy,
+                    code: "TOOL_NOT_ALLOWED",
+                    message: "Tool is not exposed in this pipeline.",
+                    details: notAllowed,
+                    evidence: new[]
+                    {
+                        new EnvelopeEvidenceItemV1
+                        {
+                            Id = "tool_not_allowed",
+                            Type = "error",
+                            Title = "Tool not exposed",
+                            Payload = notAllowed
+                        }
+                    }), sw.ElapsedMilliseconds);
+            }
+
+            // Conversation-aware filter patching (ver19)
+            // If the model only specifies delta filters for a follow-up turn, merge with the
+            // last successful query's canonical filters.
+            args = await MergeConversationFiltersIfNeededAsync(toolName, args, ct);
+
             if (!_registry.IsWhitelisted(toolName))
             {
                 policy = EnvelopePolicyV1.Deny(_ctx.Context, "TOOL_NOT_ALLOWED");
                 _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code=TOOL_NOT_ALLOWED ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
-                return EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
+                return LogAndReturn(EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
                     telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                     policy: policy,
                     code: "TOOL_NOT_ALLOWED",
                     message: "Tool not allowed.");
+                    ), sw.ElapsedMilliseconds);
             }
 
             if (!_registry.TryValidate(toolName, args, out var intent, out var validationError, out requiresWrite))
             {
                 policy = EnvelopePolicyV1.Deny(_ctx.Context, "VALIDATION_ERROR");
                 _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code=VALIDATION_ERROR ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
-                return EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
+                return LogAndReturn(EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
                     telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                     policy: policy,
                     code: "VALIDATION_ERROR",
                     message: validationError ?? "Invalid arguments.",
-                    details: new { args });
+                    details: new { args }), sw.ElapsedMilliseconds);
             }
 
             // RBAC
@@ -114,11 +149,11 @@ public sealed class ToolInvoker
             {
                 policy = EnvelopePolicyV1.Deny(_ctx.Context, "FORBIDDEN");
                 _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code=FORBIDDEN ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
-                return EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
+                return LogAndReturn(EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
                     telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                     policy: policy,
                     code: "FORBIDDEN",
-                    message: "Forbidden.");
+                    message: "Forbidden."), sw.ElapsedMilliseconds);
             }
 
             var dispatchResult = await _dispatcher.DispatchAsync(toolName, intent!, _ctx.Context, ct);
@@ -130,14 +165,14 @@ public sealed class ToolInvoker
             {
                 policy = EnvelopePolicyV1.Deny(_ctx.Context, "TOOL_EXECUTION_FAILED");
                 _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code=TOOL_EXECUTION_FAILED ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
-                return EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
+                return LogAndReturn(EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
                     telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                     policy: policy,
                     code: "TOOL_EXECUTION_FAILED",
                     message: dispatchResult.Result.Message,
                     normalizedIntent: normalizedIntent,
                     source: source,
-                    evidence: evidence);
+                    evidence: evidence), sw.ElapsedMilliseconds);
             }
 
             // Runtime response contract validation (ver25)
@@ -155,14 +190,14 @@ public sealed class ToolInvoker
                 evidence = EvidenceFallbackBuilder.Build(lastPayload);
 
             _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=true ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
-            return EnvelopeV1.Success(toolName, requiresWrite, _ctx.Context,
+            return LogAndReturn(EnvelopeV1.Success(toolName, requiresWrite, _ctx.Context,
                 telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                 policy: policy,
                 normalizedIntent: normalizedIntent,
                 message: dispatchResult.Result.Message,
                 data: dispatchResult.Result.Data,
                 source: source,
-                evidence: evidence);
+                evidence: evidence), sw.ElapsedMilliseconds);
         }
         catch (ResponseContractException ex)
         {
@@ -172,7 +207,7 @@ public sealed class ToolInvoker
             // while also keeping the API stable (no hard throw).
             policy = EnvelopePolicyV1.Deny(_ctx.Context, "CONTRACT_ERROR");
                 _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code=CONTRACT_ERROR ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
-            return EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
+            return LogAndReturn(EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
                 telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                 policy: policy,
                 code: "CONTRACT_ERROR",
@@ -186,13 +221,13 @@ public sealed class ToolInvoker
                 },
                 normalizedIntent: normalizedIntent,
                 source: source,
-                evidence: evidence);
+                evidence: evidence), sw.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
             policy = EnvelopePolicyV1.Deny(_ctx.Context, "INTERNAL_ERROR");
                 _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code=INTERNAL_ERROR ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
-            return EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
+            return LogAndReturn(EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
                 telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                 policy: policy,
                 code: "INTERNAL_ERROR",
@@ -200,7 +235,7 @@ public sealed class ToolInvoker
                 details: new { exception = ex.GetType().Name, ex.Message },
                 normalizedIntent: normalizedIntent,
                 source: source,
-                evidence: evidence);
+                evidence: evidence), sw.ElapsedMilliseconds);
         }
     }
 
@@ -208,6 +243,12 @@ public sealed class ToolInvoker
     {
         // Only tools that accept a "filters" argument participate.
         if (args.ValueKind != JsonValueKind.Object)
+            return args;
+
+        if (!_options.EnableFilterPatching)
+            return args;
+
+        if (!args.TryGetProperty("reusePreviousFilters", out var reuseEl) || reuseEl.ValueKind != JsonValueKind.True)
             return args;
 
         if (!args.TryGetProperty("filters", out var filtersElement))
@@ -239,6 +280,34 @@ public sealed class ToolInvoker
 
         using var doc = JsonDocument.Parse(node.ToJsonString(_json));
         return doc.RootElement.Clone();
+    }
+
+    private object LogAndReturn(EnvelopeV1 envelope, long durationMs)
+    {
+        var compaction = ToolResultCompactor.CompactEnvelopeWithMetadata(envelope);
+        var datasetId = TryGetDatasetId(envelope.NormalizedIntent);
+
+        _logger.LogInformation(
+            "ToolExecution audit tool={Tool} ok={Ok} durationMs={DurationMs} compactedBytes={CompactedBytes} truncated={Truncated} outputHash={OutputHash} datasetId={DatasetId} tenantId={TenantId} userId={UserId}",
+            envelope.Tool.Name,
+            envelope.Ok,
+            durationMs,
+            compaction.Bytes,
+            compaction.Truncated,
+            compaction.OutputHash,
+            datasetId,
+            envelope.Meta.TenantId,
+            envelope.Meta.UserId);
+
+        return envelope;
+    }
+
+    private static string? TryGetDatasetId(object? normalizedIntent)
+    {
+        if (normalizedIntent is DynamicToolIntent dyn)
+            return dyn.GetString("datasetId");
+
+        return null;
     }
 
     private async Task TryUpdateConversationStateAsync(string toolName, object? normalizedIntent, bool requiresWrite, CancellationToken ct)

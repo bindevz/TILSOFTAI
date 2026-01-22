@@ -2,8 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\TILSOFTAI.Domain\TILSOFTAI.Domain.csproj" />
-    <ProjectReference Include="..\TILSOFTAI.Infrastructure\TILSOFTAI.Infrastructure.csproj" />
-      <ProjectReference Include="..\TILSOFTAI.Analytics\TILSOFTAI.Analytics.csproj" />
+    <ProjectReference Include="..\TILSOFTAI.Analytics\TILSOFTAI.Analytics.csproj" />
 </ItemGroup>
 
   <ItemGroup>

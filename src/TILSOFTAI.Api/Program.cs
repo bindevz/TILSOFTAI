@@ -11,6 +11,7 @@ using TILSOFTAI.Orchestration.SK.Conversation;
 using TILSOFTAI.Api.Middleware;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Configuration.AddEnvironmentVariables();
 
 builder.Services.AddControllers();
 builder.Services.AddMemoryCache();
@@ -62,16 +63,16 @@ builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAnalyticsDatasetStore
     return fallback;
 });
 
-builder.Services.Configure<TILSOFTAI.Infrastructure.Caching.AnalyticsResultCacheOptions>(
+builder.Services.Configure<TILSOFTAI.Application.Analytics.AnalyticsResultCacheOptions>(
     builder.Configuration.GetSection("AnalyticsResultCache"));
 builder.Services.AddSingleton(sp => sp
-    .GetRequiredService<IOptions<TILSOFTAI.Infrastructure.Caching.AnalyticsResultCacheOptions>>()
+    .GetRequiredService<IOptions<TILSOFTAI.Application.Analytics.AnalyticsResultCacheOptions>>()
     .Value);
 
 builder.Services.AddSingleton<TILSOFTAI.Infrastructure.Caching.InMemoryAnalysisResultCache>();
 builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAnalyticsResultCache>(sp =>
 {
-    var opt = sp.GetRequiredService<TILSOFTAI.Infrastructure.Caching.AnalyticsResultCacheOptions>();
+    var opt = sp.GetRequiredService<TILSOFTAI.Application.Analytics.AnalyticsResultCacheOptions>();
     var fallback = sp.GetRequiredService<TILSOFTAI.Infrastructure.Caching.InMemoryAnalysisResultCache>();
 
     if (string.Equals(opt.Provider, "redis", StringComparison.OrdinalIgnoreCase) &&
@@ -163,6 +164,10 @@ builder.Services.AddSingleton<TokenBudget>();
 builder.Services.Configure<ChatTuningOptions>(builder.Configuration.GetSection("ChatTuning"));
 builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<ChatTuningOptions>>().Value);
 
+// Orchestration feature flags
+builder.Services.Configure<TILSOFTAI.Orchestration.OrchestrationOptions>(builder.Configuration.GetSection("Orchestration"));
+builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<TILSOFTAI.Orchestration.OrchestrationOptions>>().Value);
+
 // Localization
 builder.Services.AddSingleton<ILanguageResolver, HeuristicLanguageResolver>();
 builder.Services.AddSingleton<IChatTextLocalizer, DefaultChatTextLocalizer>();
@@ -212,6 +217,23 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
+if (app.Environment.IsProduction())
+{
+    var connectionStrings = app.Configuration.GetSection("ConnectionStrings").GetChildren();
+    foreach (var cs in connectionStrings)
+    {
+        if (!ContainsInlinePassword(cs.Value))
+            continue;
+
+        var envOverride = Environment.GetEnvironmentVariable($"ConnectionStrings__{cs.Key}");
+        if (!string.IsNullOrWhiteSpace(envOverride))
+            continue;
+
+        app.Logger.LogWarning("Connection string '{ConnectionName}' contains an inline password. Use environment variables or a secret manager.", cs.Key);
+        throw new InvalidOperationException("Inline passwords are not allowed in production configuration.");
+    }
+}
+
 // Middleware
 app.UseMiddleware<ExceptionHandlingMiddleware>();
 app.UseMiddleware<CorrelationIdMiddleware>();
@@ -224,3 +246,11 @@ app.UseAuthorization();
 app.MapControllers();
 
 app.Run();
+
+static bool ContainsInlinePassword(string? connectionString)
+{
+    if (string.IsNullOrWhiteSpace(connectionString))
+        return false;
+
+    return connectionString.IndexOf("Password=", StringComparison.OrdinalIgnoreCase) >= 0;
+}

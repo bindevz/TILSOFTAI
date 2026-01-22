@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Caching.Memory;
+using TILSOFTAI.Application.Analytics;
 using TILSOFTAI.Domain.Interfaces;
 
 namespace TILSOFTAI.Infrastructure.Caching;
@@ -20,6 +21,8 @@ public sealed class InMemoryAnalyticsDatasetStore : IAnalyticsDatasetStore
     {
         if (string.IsNullOrWhiteSpace(datasetId))
             throw new ArgumentException("datasetId is required.", nameof(datasetId));
+        if (dataset is not AnalyticsDatasetDto)
+            throw new ArgumentException("dataset must be AnalyticsDatasetDto.", nameof(dataset));
         _cache.Set(datasetId, dataset, ttl);
         return Task.CompletedTask;
     }
@@ -32,7 +35,10 @@ public sealed class InMemoryAnalyticsDatasetStore : IAnalyticsDatasetStore
             return false;
         }
 
-        return _cache.TryGetValue(datasetId, out dataset!);
+        if (!_cache.TryGetValue(datasetId, out dataset!))
+            return false;
+
+        return dataset is AnalyticsDatasetDto;
     }
 
     public void Remove(string datasetId)
