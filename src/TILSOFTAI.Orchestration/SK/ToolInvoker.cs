@@ -117,12 +117,18 @@ public sealed class ToolInvoker
             {
                 policy = EnvelopePolicyV1.Deny(_ctx.Context, "TOOL_NOT_ALLOWED");
                 _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code=TOOL_NOT_ALLOWED ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
-                return LogAndReturn(EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
-                    telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
-                    policy: policy,
-                    code: "TOOL_NOT_ALLOWED",
-                    message: "Tool not allowed.");
-                    ), sw.ElapsedMilliseconds);
+                return LogAndReturn(
+                    EnvelopeV1.Failure(
+                        toolName,
+                        requiresWrite,
+                        _ctx.Context,
+                        telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
+                        policy: policy,
+                        code: "TOOL_NOT_ALLOWED",
+                        message: "Tool not allowed.",
+                        details: new { allowed = allowedToolNames.OrderBy(x => x).Take(20).ToArray() }
+                    ),
+                    sw.ElapsedMilliseconds);
             }
 
             if (!_registry.TryValidate(toolName, args, out var intent, out var validationError, out requiresWrite))

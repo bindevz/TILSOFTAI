@@ -10,10 +10,6 @@ public sealed class RbacService
 
     private static readonly Dictionary<string, string[]> ToolRoles = new(StringComparer.OrdinalIgnoreCase)
     {
-        // Common
-        ["filters.catalog"] = ReadRoles,
-        ["actions.catalog"] = ReadRoles,
-
         // Analytics / Atomic
         ["analytics.run"] = ReadRoles,
         ["atomic.catalog.search"] = ReadRoles,

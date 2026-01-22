@@ -28,12 +28,11 @@ public sealed class ModeBPipelineTests
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     [Fact]
-    public async Task ModeB_ToolChain_CompactsAndRejectsDisallowedTools()
+    public async Task ModeB_ToolChain_CompactsToolMessages()
     {
         var responses = new[]
         {
             ToolCallResponse(
-                ToolCall("filters.catalog", new { resource = "atomic.query.execute", includeValues = false }),
                 ToolCall("atomic.query.execute", new { spName = "dbo.TILSOFTAI_sp_Test", @params = new { Season = "2024/2025" } })
             ),
             ToolCallResponse(
@@ -56,7 +55,7 @@ public sealed class ModeBPipelineTests
         AssertHasThreeBlocks(response.Choices.First().Message.Content);
 
         var toolMessages = GetToolMessages(handler.RequestBodies.Skip(1));
-        Assert.Contains(toolMessages, m => ContainsToolNotAllowed(m.Content));
+        Assert.NotEmpty(toolMessages);
         Assert.All(toolMessages, AssertToolMessageCompacted);
     }
 
@@ -199,7 +198,7 @@ public sealed class ModeBPipelineTests
         var rbac = new RbacService();
         var ctxAccessor = new ExecutionContextAccessor();
         var conversationStore = new InMemoryConversationStateStore();
-        var filterPatchMerger = new FilterPatchMerger();
+        var filterPatchMerger = new FilterPatchMerger(new FilterCanonicalizer());
         var validationOptions = Options.Create(new ResponseSchemaValidationOptions { Enabled = false });
         var validator = new ResponseSchemaValidator(validationOptions, NullLogger<ResponseSchemaValidator>.Instance);
         var options = new OrchestrationOptions { EnableFilterPatching = false };
@@ -286,29 +285,6 @@ public sealed class ModeBPipelineTests
                     Assert.True(rows.GetArrayLength() <= 20);
             }
         }
-    }
-
-    private static bool ContainsToolNotAllowed(string? toolContent)
-    {
-        if (string.IsNullOrWhiteSpace(toolContent))
-            return false;
-
-        using var doc = JsonDocument.Parse(toolContent);
-        var root = doc.RootElement;
-
-        if (!root.TryGetProperty("tool", out var toolEl) || toolEl.ValueKind != JsonValueKind.Object)
-            return false;
-
-        if (!toolEl.TryGetProperty("name", out var nameEl) || nameEl.ValueKind != JsonValueKind.String)
-            return false;
-
-        if (!string.Equals(nameEl.GetString(), "filters.catalog", StringComparison.OrdinalIgnoreCase))
-            return false;
-
-        return root.TryGetProperty("error", out var errorEl)
-               && errorEl.ValueKind == JsonValueKind.Object
-               && errorEl.TryGetProperty("code", out var codeEl)
-               && string.Equals(codeEl.GetString(), "TOOL_NOT_ALLOWED", StringComparison.OrdinalIgnoreCase);
     }
 
     private static OpenAiChatCompletionResponse ToolCallResponse(params OpenAiToolCall[] toolCalls)

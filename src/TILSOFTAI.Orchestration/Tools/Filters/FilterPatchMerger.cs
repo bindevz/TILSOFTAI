@@ -4,7 +4,7 @@ namespace TILSOFTAI.Orchestration.Tools.Filters;
 
 /// <summary>
 /// Default implementation of <see cref="IFilterPatchMerger"/>.
-/// - Canonicalizes both base and patch using filters-catalog (alias mapping).
+/// - Canonicalizes both base and patch using the configured canonicalizer.
 /// - Applies patch values as override; missing keys are retained from base.
 /// - A null/empty patch value removes the key.
 /// </summary>

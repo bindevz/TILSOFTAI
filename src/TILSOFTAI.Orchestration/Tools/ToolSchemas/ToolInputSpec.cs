@@ -34,7 +34,7 @@ public sealed class ToolInputSpec
     public int MaxPageSize { get; set; } = 200;
 
     /// <summary>
-    /// Whitelist filter keys for this tool (canonical keys as defined by filters.catalog).
+    /// Whitelist filter keys for this tool (canonical keys as defined by the tool schema).
     /// Validation will drop unknown keys rather than hard-fail.
     /// </summary>
     public HashSet<string> AllowedFilterKeys { get; set; } = new(StringComparer.OrdinalIgnoreCase);

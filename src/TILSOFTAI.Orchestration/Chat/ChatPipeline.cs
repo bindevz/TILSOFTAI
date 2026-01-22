@@ -43,7 +43,7 @@ public sealed class ChatPipeline
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
 
     // Tool allowlist exposed to LLM for this Orchestrator (single source of truth).
-    private static readonly IReadOnlySet<string> ExposedTools = ToolExposurePolicy.ModeBAllowedTools;
+    private static readonly IReadOnlySet<string> ExposedTools = ToolExposurePolicy.AllowedTools;
 
     public ChatPipeline(
         OpenAiChatClient chat,
