@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\TILSOFTAI.Orchestration\TILSOFTAI.Orchestration.csproj" />
+    <ProjectReference Include="..\..\src\TILSOFTAI.Analytics\TILSOFTAI.Analytics.csproj" />
   </ItemGroup>
 
   <ItemGroup>

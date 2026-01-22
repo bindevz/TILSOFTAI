@@ -9,7 +9,6 @@ using TILSOFTAI.Orchestration.Llm;
 using TILSOFTAI.Orchestration.Llm.OpenAi;
 using TILSOFTAI.Orchestration.Formatting;
 using TILSOFTAI.Orchestration.SK;
-using TILSOFTAI.Orchestration.SK.Conversation;
 using TILSOFTAI.Orchestration.Tools;
 
 namespace TILSOFTAI.Orchestration.Chat;
@@ -34,7 +33,6 @@ public sealed class ChatPipeline
     private readonly ExecutionContextAccessor _ctxAccessor;
     private readonly TokenBudget _tokenBudget;
     private readonly IAuditLogger _auditLogger;
-    private readonly IConversationStateStore _conversationState;
     private readonly ILanguageResolver _languageResolver;
     private readonly IChatTextLocalizer _localizer;
     private readonly ChatTextPatterns _patterns;
@@ -52,7 +50,6 @@ public sealed class ChatPipeline
         ExecutionContextAccessor ctxAccessor,
         TokenBudget tokenBudget,
         IAuditLogger auditLogger,
-        IConversationStateStore conversationState,
         ILanguageResolver languageResolver,
         IChatTextLocalizer localizer,
         ChatTextPatterns patterns,
@@ -65,7 +62,6 @@ public sealed class ChatPipeline
         _ctxAccessor = ctxAccessor;
         _tokenBudget = tokenBudget;
         _auditLogger = auditLogger;
-        _conversationState = conversationState;
         _languageResolver = languageResolver;
         _localizer = localizer;
         _patterns = patterns;
@@ -94,25 +90,12 @@ public sealed class ChatPipeline
         catch { /* ignore */ }
 
 
-        // Conversation state + reset filters
-        var conversationState = await _conversationState.TryGetAsync(context, cancellationToken);
-        if (_patterns.IsResetFiltersIntent(lastUserMessage))
-        {
-            await _conversationState.ClearAsync(context, cancellationToken);
-            conversationState = null;
-        }
-
-        // Resolve response language and persist.
-        var lang = _languageResolver.Resolve(incomingMessages, conversationState);
-        conversationState ??= new ConversationState();
-        if (!string.Equals(conversationState.PreferredLanguage, lang.ToIsoCode(), StringComparison.OrdinalIgnoreCase))
-        {
-            conversationState.PreferredLanguage = lang.ToIsoCode();
-            await _conversationState.UpsertAsync(context, conversationState, cancellationToken);
-        }
+        // Resolve response language.
+        var lang = _languageResolver.Resolve(incomingMessages);
 
         // Set request context for ToolInvoker
         _ctxAccessor.Context = context;
+        _ctxAccessor.ResponseLanguage = lang;
         _ctxAccessor.ConfirmedConfirmationId = _patterns.TryExtractConfirmationId(lastUserMessage);
         _ctxAccessor.AutoInvokeCount = 0;
         _ctxAccessor.CircuitBreakerTripped = false;
@@ -136,7 +119,7 @@ public sealed class ChatPipeline
             context.RequestId, context.TraceId, context.ConversationId, context.UserId, lang.ToIsoCode(), request.Model, incomingMessages.Count);
 
         // Build OpenAI messages
-        var systemPrompt = BuildSystemPrompt(lang, conversationState);
+        var systemPrompt = BuildSystemPrompt(lang);
         var messages = new List<OpenAiChatMessage>
         {
             new() { Role = "system", Content = systemPrompt }
@@ -183,18 +166,18 @@ public sealed class ChatPipeline
             {
                 var timeoutInsight = lang == ChatLanguage.En
                     ? "The request timed out (504)."
-                    : "Yeu cau bi qua thoi gian xu ly (504).";
+                    : "Yêu cầu bị quá thời gian xử lý (504).";
 
-                var timeoutFinal = ComposeFinalMarkdown(timeoutInsight, _ctxAccessor);
+                var timeoutFinal = ComposeFinalMarkdown(timeoutInsight, _ctxAccessor, lang);
                 return MapToApiResponse(lastResp, request.Model ?? "TILSOFT-AI", timeoutFinal, incomingMessages);
             }
             catch (TimeoutException)
             {
                 var timeoutInsight = lang == ChatLanguage.En
                     ? "The request timed out (504)."
-                    : "Yeu cau bi qua thoi gian xu ly (504).";
+                    : "Yêu cầu bị quá thời gian xử lý (504).";
 
-                var timeoutFinal = ComposeFinalMarkdown(timeoutInsight, _ctxAccessor);
+                var timeoutFinal = ComposeFinalMarkdown(timeoutInsight, _ctxAccessor, lang);
                 return MapToApiResponse(lastResp, request.Model ?? "TILSOFT-AI", timeoutFinal, incomingMessages);
             }
 
@@ -212,7 +195,7 @@ public sealed class ChatPipeline
                 if (string.IsNullOrWhiteSpace(insight))
                     insight = _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
 
-                var final = ComposeFinalMarkdown(insight, _ctxAccessor);
+                var final = ComposeFinalMarkdown(insight, _ctxAccessor, lang);
 
                 // Audit: AI output (best-effort)
                 try
@@ -240,7 +223,7 @@ public sealed class ChatPipeline
                     _ctxAccessor.CircuitBreakerTripped = true;
                     _ctxAccessor.CircuitBreakerReason = $"Repeated tool call signature: {toolName}";
 
-                    var forced = ComposeFinalMarkdown(_localizer.Get(ChatTextKeys.FallbackNoContent, lang), _ctxAccessor);
+                    var forced = ComposeFinalMarkdown(_localizer.Get(ChatTextKeys.FallbackNoContent, lang), _ctxAccessor, lang);
                     return MapToApiResponse(lastResp, request.Model ?? "TILSOFT-AI", forced, incomingMessages);
                 }
 
@@ -273,19 +256,12 @@ public sealed class ChatPipeline
             }
         }
 
-        var fallbackFinal = ComposeFinalMarkdown(_localizer.Get(ChatTextKeys.FallbackNoContent, lang), _ctxAccessor);
+        var fallbackFinal = ComposeFinalMarkdown(_localizer.Get(ChatTextKeys.FallbackNoContent, lang), _ctxAccessor, lang);
         return MapToApiResponse(lastResp, request.Model ?? "TILSOFT-AI", fallbackFinal, incomingMessages);
     }
-    private string BuildSystemPrompt(ChatLanguage lang, ConversationState? state)
+    private string BuildSystemPrompt(ChatLanguage lang)
     {
         var basePrompt = _localizer.Get(ChatTextKeys.SystemPrompt, lang);
-
-        // Provide prior query hint to help short follow-ups.
-        if (state?.LastQuery is not null)
-        {
-            var hint = _localizer.Get(ChatTextKeys.PreviousQueryHint, lang);
-            basePrompt += "\n\n" + hint + JsonSerializer.Serialize(state.LastQuery, _json);
-        }
 
         var outputRule = lang == ChatLanguage.En
             ? "OUTPUT: Return only plain insight text. Do NOT include Markdown headings, tables, lists, or JSON."
@@ -339,23 +315,27 @@ public sealed class ChatPipeline
         }
         return total;
     }
-    private static string ComposeFinalMarkdown(string insightText, ExecutionContextAccessor ctx)
+    private string ComposeFinalMarkdown(string insightText, ExecutionContextAccessor ctx, ChatLanguage lang)
     {
-        var emptyNote = "(kh\u00f4ng c\u00f3)";
+        var emptyNote = lang == ChatLanguage.En ? "(none)" : "(không có)";
         var insight = string.IsNullOrWhiteSpace(insightText) ? emptyNote : insightText.Trim();
         var insightPreview = string.IsNullOrWhiteSpace(ctx.LastInsightPreviewMarkdown) ? emptyNote : ctx.LastInsightPreviewMarkdown;
         var listPreview = string.IsNullOrWhiteSpace(ctx.LastListPreviewMarkdown) ? emptyNote : ctx.LastListPreviewMarkdown;
 
+        var insightTitle = _localizer.Get(ChatTextKeys.InsightBlockTitle, lang);
+        var insightPreviewTitle = _localizer.Get(ChatTextKeys.InsightPreviewTitle, lang);
+        var listPreviewTitle = _localizer.Get(ChatTextKeys.ListPreviewTitle, lang);
+
         var sb = new StringBuilder();
-        sb.AppendLine("## K\u1ebft lu\u1eadn / Insight");
+        sb.AppendLine($"## {insightTitle}");
         sb.AppendLine(insight);
         sb.AppendLine();
-        sb.AppendLine("## Preview d\u1eef li\u1ec7u c\u1ee7a K\u1ebft lu\u1eadn / Insight");
+        sb.AppendLine($"## {insightPreviewTitle}");
         if (!string.IsNullOrWhiteSpace(ctx.LastInsightPreviewTitle))
             sb.AppendLine($"_{ctx.LastInsightPreviewTitle}_");
         sb.AppendLine(insightPreview);
         sb.AppendLine();
-        sb.AppendLine("## Preview danh s\u00e1ch");
+        sb.AppendLine($"## {listPreviewTitle}");
         if (!string.IsNullOrWhiteSpace(ctx.LastListPreviewTitle))
             sb.AppendLine($"_{ctx.LastListPreviewTitle}_");
         sb.AppendLine(listPreview);
@@ -422,7 +402,7 @@ public sealed class ChatPipeline
             {
                 if (TryReadEvidenceTable(root, "summary_rows_preview", out var cols, out var rows))
                 {
-                    _ctxAccessor.LastInsightPreviewMarkdown = MarkdownTableRenderer.Render(cols, rows);
+                    _ctxAccessor.LastInsightPreviewMarkdown = MarkdownTableRenderer.Render(cols, rows, language: _ctxAccessor.ResponseLanguage);
                 }
             }
 
@@ -432,7 +412,7 @@ public sealed class ChatPipeline
                 if (TryReadDisplayTable(root, out var cols, out var rows, out var title))
                 {
                     _ctxAccessor.LastListPreviewTitle = title;
-                    _ctxAccessor.LastListPreviewMarkdown = MarkdownTableRenderer.Render(cols, rows);
+                    _ctxAccessor.LastListPreviewMarkdown = MarkdownTableRenderer.Render(cols, rows, language: _ctxAccessor.ResponseLanguage);
                 }
             }
         }

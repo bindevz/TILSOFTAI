@@ -89,6 +89,7 @@ A request-scoped context stores **client artifacts** and **recent evidence** wit
 **Server behavior**
 - Executes SP
 - Builds `schema_digest` from RS0
+- Requires explicit delivery/datasetName metadata (RS0 preferred; SchemaHintsJson.resultSets fallback) or returns SCHEMA_METADATA_REQUIRED
 - Stores engine datasets into dataset store with `datasetId`
 - Renders **list preview markdown** for the client
 
@@ -234,8 +235,12 @@ It ensures:
 ```
 
 **SchemaHintsJson** (object)
+Used as a fallback if RS0 is missing delivery/datasetName for data result sets. Prefer RS0 when available.
 ```json
 {
+  "resultSets": [
+    { "rsIndex": 2, "datasetName": "sales_engine", "delivery": "engine", "tableKind": "fact" }
+  ],
   "tables": [
     {
       "tableName": "sales_engine",
@@ -259,6 +264,7 @@ It ensures:
 Atomic SPs should emit:
 
 - **RS0 (Schema metadata)**
+  - RS0 is mandatory for routing. If delivery/datasetName are missing for data result sets, the tool returns SCHEMA_METADATA_REQUIRED unless SchemaHintsJson.resultSets provides them.
   - contains:
     - `recordType` = `resultset` | `column`
     - `resultSetIndex`

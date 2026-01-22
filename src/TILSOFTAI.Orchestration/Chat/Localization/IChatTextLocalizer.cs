@@ -8,6 +8,9 @@ public interface IChatTextLocalizer
 public static class ChatTextKeys
 {
     public const string SystemPrompt = "system_prompt";
-    public const string PreviousQueryHint = "previous_query_hint";
     public const string FallbackNoContent = "fallback_no_content";
+    public const string InsightBlockTitle = "insight_block_title";
+    public const string InsightPreviewTitle = "insight_preview_title";
+    public const string ListPreviewTitle = "list_preview_title";
+    public const string TableTruncationNote = "table_truncation_note";
 }

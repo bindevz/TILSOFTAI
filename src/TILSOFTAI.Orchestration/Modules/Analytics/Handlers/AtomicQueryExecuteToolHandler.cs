@@ -15,11 +15,9 @@ namespace TILSOFTAI.Orchestration.Modules.Analytics.Handlers;
 /// RS0 schema, RS1 summary (optional), RS2..N raw tables.
 ///
 /// Routing rules:
-/// - Prefer RS0.resultset.delivery when present: engine|display|both|auto
-/// - Otherwise fallback to tableKind heuristic:
-///     summary/dimension/lookup => display
-///     fact/raw/bridge/timeseries => engine
-/// - Fail-closed: unknown => engine
+/// - Prefer RS0.resultset delivery/datasetName when present: engine|display|both
+/// - Fallback: SPCatalog.SchemaHintsJson.resultSets (rsIndex -> delivery/datasetName/tableKind)
+/// - If neither present, fail fast with SCHEMA_METADATA_REQUIRED
 /// </summary>
 public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 {
@@ -111,8 +109,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
         var routing = RoutingPolicyOptions.Default with
         {
-            MaxDisplayRows = Math.Clamp(maxDisplayRows, 1, readOptions.MaxRowsPerTable),
-            MaxDisplayColumns = Math.Clamp(maxColumns, 1, 500)
+            MaxDisplayRows = Math.Clamp(maxDisplayRows, 1, readOptions.MaxRowsPerTable)
         };
 
         var parameters = ParseSqlParameters(dyn.GetJson("params"));
@@ -180,19 +177,63 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         var displayTables = new List<object>();
         var engineDatasets = new List<object>();
         var warnings = new List<string>();
-        var schemaHintsByTable = ParseSchemaHints(catalogEntry.SchemaHintsJson);
+        var schemaHints = ParseSchemaHints(catalogEntry.SchemaHintsJson);
+        var schemaHintsByTable = schemaHints.Tables;
+        var schemaHintsByResultSet = schemaHints.ResultSets;
         var schemaDigestTables = new List<object>();
         var engineDatasetDigests = new List<object>();
         TabularData? listPreviewTable = null;
         string? listPreviewTitle = null;
+
+        var resolvedTables = new List<(AtomicResultSet Table, ResultSetMetadata Meta)>();
+        var missingMetadata = new List<object>();
+
         foreach (var t in atomic.Tables)
         {
+            if (TryResolveResultSetMeta(t.Schema, schemaHintsByResultSet, out var meta))
+            {
+                resolvedTables.Add((t, meta));
+            }
+            else
+            {
+                missingMetadata.Add(new
+                {
+                    rsIndex = t.Schema.Index,
+                    tableName = t.Schema.TableName,
+                    delivery = t.Schema.Delivery
+                });
+            }
+        }
+
+        if (missingMetadata.Count > 0)
+        {
+            var payloadMissingMeta = BuildSchemaMetadataFailurePayload(spName, catalogEntry, missingMetadata);
+            var extrasMissingMeta = new ToolDispatchExtras(
+                Source: new EnvelopeSourceV1 { System = "registry", Name = "dbo.TILSOFTAI_SPCatalog", Cache = "na" },
+                Evidence: new[]
+                {
+                    new EnvelopeEvidenceItemV1
+                    {
+                        Id = "schema_metadata_required",
+                        Type = "metric",
+                        Title = "Schema metadata required",
+                        Payload = new { spName, missing = missingMetadata }
+                    }
+                });
+
+            return ToolDispatchResultFactory.Create(
+                dyn,
+                ToolExecutionResult.CreateFailure("atomic.query.execute blocked: schema metadata required", payloadMissingMeta),
+                extrasMissingMeta);
+        }
+
+        foreach (var (t, meta) in resolvedTables)
+        {
             var trimmedTable = TrimColumns(t.Table, maxColumns);
-            var stats = TableStats.From(trimmedTable);
-            var decision = DecideDelivery(t.Schema, stats, routing);
+            var decision = ResolveDelivery(meta);
 
             var digestColumns = BuildColumnDigests(t.Schema, trimmedTable, Math.Min(maxColumns, 60));
-            schemaHintsByTable.TryGetValue(t.Schema.TableName, out var tableHints);
+            schemaHintsByTable.TryGetValue(meta.TableName, out var tableHints);
             var primaryKey = ResolvePrimaryKey(t.Schema, tableHints);
             var joinHints = ResolveJoinHints(t.Schema, tableHints, warnings);
             var foreignKeys = ResolveForeignKeys(tableHints, joinHints, primaryKey);
@@ -201,7 +242,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
             schemaDigestTables.Add(new
             {
-                name = t.Schema.TableName,
+                name = meta.TableName,
                 kind = decision.Engine && decision.Display ? "both" : decision.Engine ? "engine" : "display",
                 rowCountEstimate = trimmedTable.TotalCount ?? trimmedTable.Rows.Count,
                 primaryKey,
@@ -217,7 +258,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
                 if (listPreviewTable is null && trimmedTable.Rows.Count > 0)
                 {
                     listPreviewTable = trimmedTable;
-                    listPreviewTitle = t.Schema.TableName;
+                    listPreviewTitle = meta.TableName;
                 }
 
                 var displayTrunc = new
@@ -231,9 +272,9 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
                 displayTables.Add(new
                 {
                     index = t.Schema.Index,
-                    tableName = t.Schema.TableName,
-                    tableKind = t.Schema.TableKind,
-                    delivery = t.Schema.Delivery ?? "auto",
+                    tableName = meta.TableName,
+                    tableKind = meta.TableKind,
+                    delivery = meta.Delivery,
                     grain = t.Schema.Grain,
                     primaryKey,
                     joinHints,
@@ -248,7 +289,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
                 });
 
                 if (trimmedTable.Rows.Count > routing.MaxDisplayRows)
-                    warnings.Add($"Display table '{t.Schema.TableName}' was truncated to {routing.MaxDisplayRows} rows (maxDisplayRows={routing.MaxDisplayRows}). Use engineDatasets + analytics.run for full analysis.");
+                    warnings.Add($"Display table '{meta.TableName}' was truncated to {routing.MaxDisplayRows} rows (maxDisplayRows={routing.MaxDisplayRows}). Use engineDatasets + analytics.run for full analysis.");
             }
 
             if (decision.Engine)
@@ -257,7 +298,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
                 // This often occurs when a stored procedure returns a schema-only RS (e.g., list mode) and can mislead the LLM into retry loops.
                 if (trimmedTable.Rows.Count == 0)
                 {
-                    warnings.Add($"Engine table '{t.Schema.TableName}' returned 0 rows; dataset was not created. If you intended dataset mode, pass @Page=0 (and ensure @Page/@Size are not dropped by catalog allow-lists).");
+                    warnings.Add($"Engine table '{meta.TableName}' returned 0 rows; dataset was not created. If you intended dataset mode, pass @Page=0 (and ensure @Page/@Size are not dropped by catalog allow-lists).");
                 }
                 else
                 {
@@ -269,7 +310,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
                     Func<string, object?> digestFactory = datasetId => BuildEngineDatasetDigest(
                         datasetId,
-                        t.Schema.TableName,
+                        meta.TableName,
                         digestColumns,
                         primaryKey,
                         joinHints,
@@ -289,9 +330,9 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
                     engineDatasets.Add(new
                     {
                         index = t.Schema.Index,
-                        tableName = t.Schema.TableName,
-                        tableKind = t.Schema.TableKind,
-                        delivery = t.Schema.Delivery ?? "auto",
+                        tableName = meta.TableName,
+                        tableKind = meta.TableKind,
+                        delivery = meta.Delivery,
                         routingReason = decision.Reason,
                         datasetId = dataset.DatasetId,
                         expiresAtUtc = dataset.ExpiresAtUtc,
@@ -318,7 +359,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         if (listPreviewTable is not null)
         {
             _ctxAccessor.LastListPreviewTitle = listPreviewTitle;
-            _ctxAccessor.LastListPreviewMarkdown = MarkdownTableRenderer.Render(listPreviewTable);
+            _ctxAccessor.LastListPreviewMarkdown = MarkdownTableRenderer.Render(listPreviewTable, language: _ctxAccessor.ResponseLanguage);
         }
 
         var schemaDigest = new
@@ -362,7 +403,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         var evidence = BuildEvidenceFromAtomicResult(spName, atomic, displayTables.Count, engineDatasets.Count, schemaDigest, engineDatasetsDigest, warnings);
 
         // Cache key answer hints for deterministic fallback when circuit breaker trips.
-        CacheAnswerHints(spName, atomic);
+        CacheAnswerHints(spName, atomic, schemaHintsByResultSet);
 
         _logger.LogInformation(
             "AtomicQueryExecute done sp={Sp} totalCount={TotalCount} displayTables={DisplayTables} engineDatasets={EngineDatasets} tables={Tables}",
@@ -379,7 +420,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateSuccess("atomic.query.execute executed", payload), extras);
     }
 
-    private void CacheAnswerHints(string spName, AtomicQueryResult atomic)
+    private void CacheAnswerHints(string spName, AtomicQueryResult atomic, IReadOnlyDictionary<int, SchemaHintsResultSet> resultSetHints)
     {
         var totalCount = TryGetIntFromSummary(atomic.Summary?.Table, "totalCount");
         if (totalCount is null)
@@ -397,11 +438,11 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
             ?? (filters.TryGetValue("collectionFilter", out var c) ? c?.ToString() : null);
         _ctxAccessor.LastRangeNameFilter = TryGetStringFromSummary(atomic.Summary?.Table, "rangeNameFilter")
             ?? (filters.TryGetValue("rangeNameFilter", out var r) ? r?.ToString() : null);
-        _ctxAccessor.LastDisplayPreviewJson = TryBuildDisplayPreviewJson(atomic, maxRows: 12, maxCols: 12);
+        _ctxAccessor.LastDisplayPreviewJson = TryBuildDisplayPreviewJson(atomic, resultSetHints, maxRows: 12, maxCols: 12);
     }
 
     
-    private static object? TryBuildDisplayPreviewPayload(AtomicQueryResult atomic, int maxRows, int maxCols)
+    private static object? TryBuildDisplayPreviewPayload(AtomicQueryResult atomic, IReadOnlyDictionary<int, SchemaHintsResultSet> resultSetHints, int maxRows, int maxCols)
     {
         maxRows = Math.Clamp(maxRows, 1, 50);
         maxCols = Math.Clamp(maxCols, 1, 30);
@@ -409,24 +450,23 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         if (atomic is null || atomic.Tables is null || atomic.Tables.Count == 0)
             return null;
 
-        // Prefer explicit delivery=display|both, then fallback to first non-empty table.
-        var preferred = atomic.Tables
-            .Where(t =>
-                t?.Schema is not null &&
-                (string.Equals(t.Schema.Delivery, "display", StringComparison.OrdinalIgnoreCase) ||
-                 string.Equals(t.Schema.Delivery, "both", StringComparison.OrdinalIgnoreCase)))
-            .FirstOrDefault(t => t.Table?.Rows is not null && t.Table.Rows.Count > 0);
+        var chosen = atomic.Tables
+            .Select(t => new { Table = t, Meta = TryResolveResultSetMeta(t.Schema, resultSetHints, out var meta) ? meta : null })
+            .FirstOrDefault(t =>
+                t.Meta is not null &&
+                (t.Meta.Delivery == "display" || t.Meta.Delivery == "both") &&
+                t.Table.Table?.Rows is not null &&
+                t.Table.Table.Rows.Count > 0);
 
-        var chosen = preferred ?? atomic.Tables.FirstOrDefault(t => t.Table?.Rows is not null && t.Table.Rows.Count > 0);
-        if (chosen is null || chosen.Table is null || chosen.Table.Rows.Count == 0)
+        if (chosen is null || chosen.Table.Table is null || chosen.Table.Table.Rows.Count == 0 || chosen.Meta is null)
             return null;
 
-        var cols = chosen.Table.Columns.Take(maxCols).Select(c => c.Name).ToArray();
-        var rows = new List<Dictionary<string, object?>>(Math.Min(maxRows, chosen.Table.Rows.Count));
+        var cols = chosen.Table.Table.Columns.Take(maxCols).Select(c => c.Name).ToArray();
+        var rows = new List<Dictionary<string, object?>>(Math.Min(maxRows, chosen.Table.Table.Rows.Count));
 
-        for (var r = 0; r < Math.Min(maxRows, chosen.Table.Rows.Count); r++)
+        for (var r = 0; r < Math.Min(maxRows, chosen.Table.Table.Rows.Count); r++)
         {
-            var src = chosen.Table.Rows[r];
+            var src = chosen.Table.Table.Rows[r];
             var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
             for (var c = 0; c < cols.Length; c++)
             {
@@ -437,18 +477,18 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
         return new
         {
-            tableName = chosen.Schema.TableName,
-            tableKind = chosen.Schema.TableKind,
-            delivery = chosen.Schema.Delivery ?? "auto",
+            tableName = chosen.Meta.TableName,
+            tableKind = chosen.Meta.TableKind,
+            delivery = chosen.Meta.Delivery,
             columns = cols,
-            rowsReturned = chosen.Table.Rows.Count,
+            rowsReturned = chosen.Table.Table.Rows.Count,
             preview = rows
         };
     }
 
-    private static string? TryBuildDisplayPreviewJson(AtomicQueryResult atomic, int maxRows, int maxCols)
+    private static string? TryBuildDisplayPreviewJson(AtomicQueryResult atomic, IReadOnlyDictionary<int, SchemaHintsResultSet> resultSetHints, int maxRows, int maxCols)
     {
-        var payload = TryBuildDisplayPreviewPayload(atomic, maxRows, maxCols);
+        var payload = TryBuildDisplayPreviewPayload(atomic, resultSetHints, maxRows, maxCols);
         if (payload is null) return null;
 
         try
@@ -589,37 +629,79 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
         IReadOnlyList<string> MeasureHints,
         IReadOnlyList<string> DimensionHints);
 
-    private static IReadOnlyDictionary<string, SchemaHintsTable> ParseSchemaHints(string? schemaHintsJson)
+    private sealed record SchemaHintsResultSet(
+        int Index,
+        string? DatasetName,
+        string? Delivery,
+        string? TableKind);
+
+    private sealed record SchemaHints(
+        IReadOnlyDictionary<string, SchemaHintsTable> Tables,
+        IReadOnlyDictionary<int, SchemaHintsResultSet> ResultSets);
+
+    private sealed record ResultSetMetadata(
+        int Index,
+        string TableName,
+        string? TableKind,
+        string Delivery,
+        string DeliverySource);
+
+    private static SchemaHints ParseSchemaHints(string? schemaHintsJson)
     {
-        var dict = new Dictionary<string, SchemaHintsTable>(StringComparer.OrdinalIgnoreCase);
+        var tables = new Dictionary<string, SchemaHintsTable>(StringComparer.OrdinalIgnoreCase);
+        var resultSets = new Dictionary<int, SchemaHintsResultSet>();
         if (string.IsNullOrWhiteSpace(schemaHintsJson))
-            return dict;
+            return new SchemaHints(tables, resultSets);
 
         try
         {
             using var doc = JsonDocument.Parse(schemaHintsJson);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
-                return dict;
+                return new SchemaHints(tables, resultSets);
 
-            if (!root.TryGetProperty("tables", out var tablesEl) || tablesEl.ValueKind != JsonValueKind.Array)
-                return dict;
-
-            foreach (var t in tablesEl.EnumerateArray())
+            if (root.TryGetProperty("tables", out var tablesEl) && tablesEl.ValueKind == JsonValueKind.Array)
             {
-                if (t.ValueKind != JsonValueKind.Object)
-                    continue;
+                foreach (var t in tablesEl.EnumerateArray())
+                {
+                    if (t.ValueKind != JsonValueKind.Object)
+                        continue;
 
-                var tableName = GetString(t, "tableName");
-                if (string.IsNullOrWhiteSpace(tableName))
-                    continue;
+                    var tableName = GetString(t, "tableName");
+                    if (string.IsNullOrWhiteSpace(tableName))
+                        continue;
 
-                var primaryKey = ReadStringArray(t, "primaryKey");
-                var measureHints = ReadStringArray(t, "measureHints");
-                var dimensionHints = ReadStringArray(t, "dimensionHints");
-                var foreignKeys = ReadForeignKeys(t);
+                    var primaryKey = ReadStringArray(t, "primaryKey");
+                    var measureHints = ReadStringArray(t, "measureHints");
+                    var dimensionHints = ReadStringArray(t, "dimensionHints");
+                    var foreignKeys = ReadForeignKeys(t);
 
-                dict[tableName!] = new SchemaHintsTable(primaryKey, foreignKeys, measureHints, dimensionHints);
+                    tables[tableName!] = new SchemaHintsTable(primaryKey, foreignKeys, measureHints, dimensionHints);
+                }
+            }
+
+            if (root.TryGetProperty("resultSets", out var resultSetsEl) && resultSetsEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var rs in resultSetsEl.EnumerateArray())
+                {
+                    if (rs.ValueKind != JsonValueKind.Object)
+                        continue;
+
+                    var rsIndex =
+                        GetInt(rs, "rsIndex") ??
+                        GetInt(rs, "resultSetIndex") ??
+                        GetInt(rs, "resultSet") ??
+                        GetInt(rs, "index");
+
+                    if (rsIndex is null || rsIndex <= 0)
+                        continue;
+
+                    var datasetName = GetStringAny(rs, "datasetName", "tableName", "name");
+                    var delivery = GetStringAny(rs, "delivery", "target", "audience");
+                    var tableKind = GetStringAny(rs, "tableKind", "kind");
+
+                    resultSets[rsIndex.Value] = new SchemaHintsResultSet(rsIndex.Value, datasetName, delivery, tableKind);
+                }
             }
         }
         catch
@@ -627,7 +709,7 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
             // Ignore schema hints parse errors.
         }
 
-        return dict;
+        return new SchemaHints(tables, resultSets);
     }
 
     private static IReadOnlyList<SchemaHintsForeignKey> ReadForeignKeys(JsonElement table)
@@ -677,6 +759,92 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
 
     private static string? GetString(JsonElement node, string propertyName)
         => node.TryGetProperty(propertyName, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    private static string? GetStringAny(JsonElement node, params string[] propertyNames)
+    {
+        foreach (var name in propertyNames)
+        {
+            var value = GetString(node, name);
+            if (!string.IsNullOrWhiteSpace(value))
+                return value;
+        }
+
+        return null;
+    }
+
+    private static int? GetInt(JsonElement node, string propertyName)
+    {
+        if (!node.TryGetProperty(propertyName, out var v))
+            return null;
+
+        return v.ValueKind switch
+        {
+            JsonValueKind.Number when v.TryGetInt32(out var n) => n,
+            JsonValueKind.String when int.TryParse(v.GetString(), out var s) => s,
+            _ => null
+        };
+    }
+
+    private static bool TryResolveResultSetMeta(
+        AtomicResultSetSchema schema,
+        IReadOnlyDictionary<int, SchemaHintsResultSet> resultSetHints,
+        out ResultSetMetadata metadata)
+    {
+        resultSetHints.TryGetValue(schema.Index, out var hint);
+
+        var delivery = NormalizeDelivery(schema.Delivery);
+        var deliverySource = "RS0.delivery";
+        if (delivery is null && hint?.Delivery is not null)
+        {
+            delivery = NormalizeDelivery(hint.Delivery);
+            if (delivery is not null)
+                deliverySource = "SchemaHintsJson.resultSets";
+        }
+
+        if (string.IsNullOrWhiteSpace(delivery))
+        {
+            metadata = null!;
+            return false;
+        }
+
+        var tableName = schema.TableName;
+        if ((string.IsNullOrWhiteSpace(tableName) || IsPlaceholderTableName(tableName, schema.Index)) &&
+            !string.IsNullOrWhiteSpace(hint?.DatasetName))
+        {
+            tableName = hint.DatasetName;
+        }
+
+        if (string.IsNullOrWhiteSpace(tableName))
+            tableName = $"rs{schema.Index}";
+
+        var tableKind = !string.IsNullOrWhiteSpace(schema.TableKind) ? schema.TableKind : hint?.TableKind;
+
+        metadata = new ResultSetMetadata(schema.Index, tableName!, tableKind, delivery, deliverySource);
+        return true;
+    }
+
+    private static string? NormalizeDelivery(string? delivery)
+    {
+        if (string.IsNullOrWhiteSpace(delivery))
+            return null;
+
+        var normalized = delivery.Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            "engine" => normalized,
+            "display" => normalized,
+            "both" => normalized,
+            _ => null
+        };
+    }
+
+    private static bool IsPlaceholderTableName(string? tableName, int rsIndex)
+    {
+        if (string.IsNullOrWhiteSpace(tableName))
+            return true;
+
+        return string.Equals(tableName, $"rs{rsIndex}", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static IReadOnlyList<string> ResolvePrimaryKey(AtomicResultSetSchema schema, SchemaHintsTable? hints)
     {
@@ -1136,6 +1304,57 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
         };
     }
 
+    private static object BuildSchemaMetadataFailurePayload(
+        string spName,
+        AtomicCatalogEntry catalogEntry,
+        IReadOnlyList<object> missingResultSets)
+    {
+        return new
+        {
+            kind = "atomic.query.execute.v1",
+            schemaVersion = 2,
+            generatedAtUtc = DateTimeOffset.UtcNow,
+            resource = "atomic.query.execute",
+            error = new
+            {
+                code = "SCHEMA_METADATA_REQUIRED",
+                message = "Schema metadata is required to route result sets. Provide RS0 delivery/datasetName or SPCatalog.SchemaHintsJson.resultSets."
+            },
+            remediation = new
+            {
+                rs0 = "Ensure RS0 includes resultset rows with delivery (engine|display|both) and datasetName/tableName for each RS2..N data table.",
+                schemaHints = "Alternatively set dbo.TILSOFTAI_SPCatalog.SchemaHintsJson.resultSets with rsIndex/datasetName/delivery/tableKind."
+            },
+            missingResultSets,
+            data = new
+            {
+                storedProcedure = spName,
+                catalog = new
+                {
+                    domain = catalogEntry.Domain,
+                    entity = catalogEntry.Entity,
+                    intent = new { vi = catalogEntry.IntentVi, en = catalogEntry.IntentEn },
+                    tags = catalogEntry.Tags
+                },
+                schema = (object?)null,
+                summary = (object?)null,
+                displayTables = Array.Empty<object>(),
+                engineDatasets = Array.Empty<object>()
+            },
+            schemaHintsJson = new
+            {
+                resultSets = new[]
+                {
+                    new { rsIndex = 2, datasetName = "sales_engine", delivery = "engine", tableKind = "fact" }
+                }
+            },
+            warnings = new[]
+            {
+                "SCHEMA_METADATA_REQUIRED: RS0 delivery/datasetName or SchemaHintsJson.resultSets is required for data tables."
+            }
+        };
+    }
+
     private static object? ConvertJsonValue(JsonElement v)
     {
         switch (v.ValueKind)
@@ -1168,56 +1387,15 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
         }
     }
 
-    private static RoutingDecision DecideDelivery(AtomicResultSetSchema schema, TableStats stats, RoutingPolicyOptions policy)
+    private static RoutingDecision ResolveDelivery(ResultSetMetadata meta)
     {
-        var delivery = (schema.Delivery ?? "auto").Trim().ToLowerInvariant();
-        var kind = (schema.TableKind ?? string.Empty).Trim().ToLowerInvariant();
-
-        var sizeTooLargeForDisplay =
-            stats.RowCount > policy.HardMaxDisplayRows ||
-            stats.ColCount > policy.MaxDisplayColumns ||
-            stats.CellCount > policy.MaxDisplayCells;
-
-        // 1) Explicit delivery directive in RS0 (preferred)
-        if (delivery == "engine")
-            return new RoutingDecision(Engine: true, Display: false, Reason: "RS0.delivery=engine");
-
-        if (delivery == "display")
+        return meta.Delivery switch
         {
-            // Guardrail: if too large, convert to BOTH so user can still analyze.
-            if (sizeTooLargeForDisplay)
-                return new RoutingDecision(Engine: true, Display: true, Reason: "RS0.delivery=display but table is large => both (display truncated + engine dataset)");
-            return new RoutingDecision(Engine: false, Display: true, Reason: "RS0.delivery=display");
-        }
-
-        if (delivery == "both")
-            return new RoutingDecision(Engine: true, Display: true, Reason: "RS0.delivery=both");
-
-        // 2) Auto routing by tableKind + size heuristics
-        var displayPreferred = kind is "summary" or "dimension" or "lookup" or "kpi" or "report";
-        var enginePreferred = kind is "fact" or "raw" or "bridge" or "timeseries" or "transaction";
-
-        if (displayPreferred)
-        {
-            if (sizeTooLargeForDisplay)
-                return new RoutingDecision(Engine: true, Display: true, Reason: $"tableKind={kind} display-preferred but large => both (display truncated + engine dataset)");
-            return new RoutingDecision(Engine: false, Display: true, Reason: $"tableKind={kind} => display");
-        }
-
-        if (enginePreferred)
-        {
-            // If small, show + also create dataset (helps debugging and UX)
-            if (stats.RowCount <= policy.SmallTableRowsForBoth && stats.CellCount <= policy.SmallTableCellsForBoth)
-                return new RoutingDecision(Engine: true, Display: true, Reason: $"tableKind={kind} engine-preferred but small => both");
-
-            return new RoutingDecision(Engine: true, Display: false, Reason: $"tableKind={kind} => engine");
-        }
-
-        // 3) Unknown kinds: fail-closed to engine; allow BOTH only when table is tiny.
-        if (stats.RowCount <= policy.TinyTableRowsForBoth && stats.CellCount <= policy.TinyTableCellsForBoth)
-            return new RoutingDecision(Engine: true, Display: true, Reason: "unknown tableKind but tiny => both");
-
-        return new RoutingDecision(Engine: true, Display: false, Reason: "unknown tableKind => engine (fail-closed)");
+            "engine" => new RoutingDecision(Engine: true, Display: false, Reason: $"{meta.DeliverySource}=engine"),
+            "display" => new RoutingDecision(Engine: false, Display: true, Reason: $"{meta.DeliverySource}=display"),
+            "both" => new RoutingDecision(Engine: true, Display: true, Reason: $"{meta.DeliverySource}=both"),
+            _ => new RoutingDecision(Engine: false, Display: false, Reason: $"{meta.DeliverySource}=missing")
+        };
     }
 
     private static TabularData TrimRows(TabularData table, int maxRows)
@@ -1232,35 +1410,9 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
 
     private sealed record RoutingDecision(bool Engine, bool Display, string Reason);
 
-    private sealed record RoutingPolicyOptions(
-        int MaxDisplayRows,
-        int HardMaxDisplayRows,
-        int MaxDisplayColumns,
-        long MaxDisplayCells,
-        int SmallTableRowsForBoth,
-        long SmallTableCellsForBoth,
-        int TinyTableRowsForBoth,
-        long TinyTableCellsForBoth)
+    private sealed record RoutingPolicyOptions(int MaxDisplayRows)
     {
-        public static RoutingPolicyOptions Default => new(
-            MaxDisplayRows: 2000,
-            HardMaxDisplayRows: 5000,
-            MaxDisplayColumns: 60,
-            MaxDisplayCells: 120_000,
-            SmallTableRowsForBoth: 250,
-            SmallTableCellsForBoth: 25_000,
-            TinyTableRowsForBoth: 50,
-            TinyTableCellsForBoth: 5_000);
-    }
-
-    private sealed record TableStats(int RowCount, int ColCount, long CellCount)
-    {
-        public static TableStats From(TabularData table)
-        {
-            var rows = table.Rows.Count;
-            var cols = table.Columns.Count;
-            return new TableStats(rows, cols, (long)rows * cols);
-        }
+        public static RoutingPolicyOptions Default => new(MaxDisplayRows: 2000);
     }
 
     private static TabularData TrimColumns(TabularData table, int maxColumns)

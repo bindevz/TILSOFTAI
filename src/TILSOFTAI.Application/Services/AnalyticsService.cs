@@ -171,7 +171,7 @@ public sealed class AnalyticsService
         }
 
         var useCache = !persistResult && _resultCache is not null;
-        var cacheKey = useCache ? BuildCacheKey(datasetId, pipeline, bounds) : string.Empty;
+        var cacheKey = useCache ? BuildCacheKey(datasetId, pipeline, bounds, context.TenantId, context.UserId) : string.Empty;
         if (useCache && _resultCache!.TryGet(cacheKey, out var cached) && cached is RunResult cachedResult)
             return cachedResult;
 
@@ -391,10 +391,10 @@ public sealed class AnalyticsService
         return TimeSpan.FromMinutes(minutes);
     }
 
-    private static string BuildCacheKey(string datasetId, JsonElement pipeline, RunBounds bounds)
+    private static string BuildCacheKey(string datasetId, JsonElement pipeline, RunBounds bounds, string tenantId, string userId)
     {
         var raw = pipeline.GetRawText();
-        var input = string.Join("|", datasetId,
+        var input = string.Join("|", tenantId, userId, datasetId,
             bounds.TopN,
             bounds.MaxGroups,
             bounds.MaxResultRows,

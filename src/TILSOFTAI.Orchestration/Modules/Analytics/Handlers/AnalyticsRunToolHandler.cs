@@ -92,7 +92,7 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
             evidence = payloadEvidence
         };
 
-        _ctxAccessor.LastInsightPreviewMarkdown = MarkdownTableRenderer.Render(new AnalyticsSchema(result.Schema), previewRows);
+        _ctxAccessor.LastInsightPreviewMarkdown = MarkdownTableRenderer.Render(new AnalyticsSchema(result.Schema), previewRows, language: _ctxAccessor.ResponseLanguage);
 
         var evidence = new List<EnvelopeEvidenceItemV1>
         {

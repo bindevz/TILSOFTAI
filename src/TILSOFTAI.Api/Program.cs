@@ -7,7 +7,6 @@ using TILSOFTAI.Orchestration.Chat;
 using TILSOFTAI.Orchestration.Chat.Localization;
 using TILSOFTAI.Orchestration.Llm;
 using TILSOFTAI.Orchestration.Llm.OpenAi;
-using TILSOFTAI.Orchestration.SK.Conversation;
 using TILSOFTAI.Api.Middleware;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -92,9 +91,6 @@ builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAnalyticsResultCache>
     return fallback;
 });
 
-// Tool modularity
-builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.Modularity.IFilterCanonicalizer, TILSOFTAI.Orchestration.Tools.Modularity.FilterCanonicalizer>();
-
 // Tool schemas
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolSchemas.IToolInputSpecProvider, TILSOFTAI.Orchestration.Modules.Analytics.AnalyticsToolInputSpecProvider>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolSchemas.ToolInputSpecCatalog>();
@@ -112,8 +108,6 @@ builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.ToolDispatcher>();
 
 // Filters patching
-builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.Filters.IFilterPatchMerger, TILSOFTAI.Orchestration.Tools.Filters.FilterPatchMerger>();
-
 // Audit
 builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAuditLogger, TILSOFTAI.Infrastructure.Observability.AuditLogger>();
 
@@ -157,9 +151,6 @@ builder.Services.Configure<ChatTuningOptions>(builder.Configuration.GetSection("
 builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<ChatTuningOptions>>().Value);
 
 // Orchestration feature flags
-builder.Services.Configure<TILSOFTAI.Orchestration.OrchestrationOptions>(builder.Configuration.GetSection("Orchestration"));
-builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<TILSOFTAI.Orchestration.OrchestrationOptions>>().Value);
-
 // Localization
 builder.Services.AddSingleton<ILanguageResolver, HeuristicLanguageResolver>();
 builder.Services.AddSingleton<IChatTextLocalizer, DefaultChatTextLocalizer>();
@@ -168,31 +159,6 @@ builder.Services.AddSingleton<ChatTextPatterns>();
 // ToolInvoker infra
 builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.ExecutionContextAccessor>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.ToolInvoker>();
-
-// Conversation state store
-builder.Services.Configure<ConversationStateStoreOptions>(builder.Configuration.GetSection("ConversationStateStore"));
-builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<ConversationStateStoreOptions>>().Value);
-
-builder.Services.AddSingleton<IConversationStateStore>(sp =>
-{
-    var opt = sp.GetRequiredService<ConversationStateStoreOptions>();
-
-    if (string.Equals(opt.Provider, "Redis", StringComparison.OrdinalIgnoreCase)
-        && !string.IsNullOrWhiteSpace(opt.Redis.ConnectionString))
-    {
-        try
-        {
-            var mux = ConnectionMultiplexer.Connect(opt.Redis.ConnectionString);
-            return new RedisConversationStateStore(mux, opt);
-        }
-        catch
-        {
-            return new InMemoryConversationStateStore(opt);
-        }
-    }
-
-    return new InMemoryConversationStateStore(opt);
-});
 
 // Chat pipeline (Mode B)
 builder.Services.AddScoped<ChatPipeline>();

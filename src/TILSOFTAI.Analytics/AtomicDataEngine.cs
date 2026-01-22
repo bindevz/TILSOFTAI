@@ -1019,14 +1019,14 @@ public sealed class AtomicDataEngine
             return list;
         }
 
-        private static Dictionary<string, List<long>> BuildRightIndex(
+        private static Dictionary<CompositeKey, List<long>> BuildRightIndex(
             DataFrame right,
             int[] keyIndexes,
             int maxIndexRows,
             int maxMatchesPerKey,
             List<string> warnings)
         {
-            var index = new Dictionary<string, List<long>>(StringComparer.OrdinalIgnoreCase);
+            var index = new Dictionary<CompositeKey, List<long>>(CompositeKeyComparer.Instance);
             var cappedRows = Math.Max(0, Math.Min((long)maxIndexRows, right.Rows.Count));
             var truncatedIndexRows = right.Rows.Count > cappedRows;
             var truncatedMatches = false;
@@ -1057,22 +1057,259 @@ public sealed class AtomicDataEngine
             return index;
         }
 
-        private static string BuildCompositeKey(DataFrame df, int[] keyIndexes, long rowIndex)
+        private static CompositeKey BuildCompositeKey(DataFrame df, int[] keyIndexes, long rowIndex)
         {
-            if (keyIndexes.Length == 1)
-            {
-                var v = df.Columns[keyIndexes[0]][rowIndex];
-                return v?.ToString() ?? string.Empty;
-            }
-
-            var parts = new string[keyIndexes.Length];
+            var parts = new CompositeKeyPart[keyIndexes.Length];
             for (var i = 0; i < keyIndexes.Length; i++)
             {
                 var v = df.Columns[keyIndexes[i]][rowIndex];
-                parts[i] = v?.ToString() ?? string.Empty;
+                parts[i] = CompositeKeyPart.From(v);
             }
 
-            return string.Join("\u001F", parts);
+            return new CompositeKey(parts);
+        }
+
+        private enum CompositeKeyPartKind
+        {
+            Null = 0,
+            NumericDecimal = 1,
+            NumericDouble = 2,
+            DateTime = 3,
+            Boolean = 4,
+            String = 5
+        }
+
+        private readonly struct CompositeKeyPart : IEquatable<CompositeKeyPart>
+        {
+            public CompositeKeyPartKind Kind { get; }
+            public decimal DecimalValue { get; }
+            public double DoubleValue { get; }
+            public long LongValue { get; }
+            public bool BoolValue { get; }
+            public string? TextValue { get; }
+
+            private CompositeKeyPart(CompositeKeyPartKind kind, decimal dec, double dbl, long lng, bool bl, string? text)
+            {
+                Kind = kind;
+                DecimalValue = dec;
+                DoubleValue = dbl;
+                LongValue = lng;
+                BoolValue = bl;
+                TextValue = text;
+            }
+
+            public static CompositeKeyPart From(object? value)
+            {
+                if (value is null)
+                    return new CompositeKeyPart(CompositeKeyPartKind.Null, 0m, 0d, 0L, false, null);
+
+                if (value is string s)
+                {
+                    if (TryParseNumericString(s, out var numericPart))
+                        return numericPart;
+
+                    return new CompositeKeyPart(CompositeKeyPartKind.String, 0m, 0d, 0L, false, s);
+                }
+
+                if (value is bool b)
+                    return new CompositeKeyPart(CompositeKeyPartKind.Boolean, 0m, 0d, 0L, b, null);
+
+                if (value is DateTime dt)
+                    return new CompositeKeyPart(CompositeKeyPartKind.DateTime, 0m, 0d, NormalizeDateTicks(dt), false, null);
+
+                if (value is DateTimeOffset dto)
+                    return new CompositeKeyPart(CompositeKeyPartKind.DateTime, 0m, 0d, dto.UtcTicks, false, null);
+
+                if (TryNormalizeNumeric(value, out var numeric))
+                    return numeric;
+
+                if (value is IFormattable formattable)
+                {
+                    var text = formattable.ToString(null, CultureInfo.InvariantCulture);
+                    return new CompositeKeyPart(CompositeKeyPartKind.String, 0m, 0d, 0L, false, text);
+                }
+
+                return new CompositeKeyPart(CompositeKeyPartKind.String, 0m, 0d, 0L, false, value.ToString());
+            }
+
+            public bool Equals(CompositeKeyPart other)
+            {
+                if (Kind != other.Kind)
+                    return false;
+
+                return Kind switch
+                {
+                    CompositeKeyPartKind.Null => true,
+                    CompositeKeyPartKind.NumericDecimal => DecimalValue == other.DecimalValue,
+                    CompositeKeyPartKind.NumericDouble => DoubleValue.Equals(other.DoubleValue),
+                    CompositeKeyPartKind.DateTime => LongValue == other.LongValue,
+                    CompositeKeyPartKind.Boolean => BoolValue == other.BoolValue,
+                    CompositeKeyPartKind.String => StringComparer.OrdinalIgnoreCase.Equals(TextValue ?? string.Empty, other.TextValue ?? string.Empty),
+                    _ => false
+                };
+            }
+
+            public override bool Equals(object? obj)
+                => obj is CompositeKeyPart other && Equals(other);
+
+            public override int GetHashCode()
+            {
+                var hash = new HashCode();
+                hash.Add((int)Kind);
+                switch (Kind)
+                {
+                    case CompositeKeyPartKind.NumericDecimal:
+                        hash.Add(DecimalValue);
+                        break;
+                    case CompositeKeyPartKind.NumericDouble:
+                        hash.Add(DoubleValue);
+                        break;
+                    case CompositeKeyPartKind.DateTime:
+                        hash.Add(LongValue);
+                        break;
+                    case CompositeKeyPartKind.Boolean:
+                        hash.Add(BoolValue);
+                        break;
+                    case CompositeKeyPartKind.String:
+                        hash.Add(TextValue ?? string.Empty, StringComparer.OrdinalIgnoreCase);
+                        break;
+                }
+                return hash.ToHashCode();
+            }
+
+            private static bool TryNormalizeNumeric(object value, out CompositeKeyPart part)
+            {
+                switch (value)
+                {
+                    case decimal dec:
+                        part = new CompositeKeyPart(CompositeKeyPartKind.NumericDecimal, dec, 0d, 0L, false, null);
+                        return true;
+                    case sbyte sb:
+                        part = new CompositeKeyPart(CompositeKeyPartKind.NumericDecimal, sb, 0d, 0L, false, null);
+                        return true;
+                    case byte b:
+                        part = new CompositeKeyPart(CompositeKeyPartKind.NumericDecimal, b, 0d, 0L, false, null);
+                        return true;
+                    case short s:
+                        part = new CompositeKeyPart(CompositeKeyPartKind.NumericDecimal, s, 0d, 0L, false, null);
+                        return true;
+                    case ushort us:
+                        part = new CompositeKeyPart(CompositeKeyPartKind.NumericDecimal, us, 0d, 0L, false, null);
+                        return true;
+                    case int i:
+                        part = new CompositeKeyPart(CompositeKeyPartKind.NumericDecimal, i, 0d, 0L, false, null);
+                        return true;
+                    case uint ui:
+                        part = new CompositeKeyPart(CompositeKeyPartKind.NumericDecimal, ui, 0d, 0L, false, null);
+                        return true;
+                    case long l:
+                        part = new CompositeKeyPart(CompositeKeyPartKind.NumericDecimal, l, 0d, 0L, false, null);
+                        return true;
+                    case ulong ul:
+                        part = new CompositeKeyPart(CompositeKeyPartKind.NumericDecimal, ul, 0d, 0L, false, null);
+                        return true;
+                    case float f:
+                        return TryNormalizeDouble(f, out part);
+                    case double d:
+                        return TryNormalizeDouble(d, out part);
+                }
+
+                part = default;
+                return false;
+            }
+
+            private static bool TryNormalizeDouble(double value, out CompositeKeyPart part)
+            {
+                if (double.IsNaN(value) || double.IsInfinity(value))
+                {
+                    part = new CompositeKeyPart(CompositeKeyPartKind.NumericDouble, 0m, value, 0L, false, null);
+                    return true;
+                }
+
+                try
+                {
+                    var dec = Convert.ToDecimal(value, CultureInfo.InvariantCulture);
+                    part = new CompositeKeyPart(CompositeKeyPartKind.NumericDecimal, dec, 0d, 0L, false, null);
+                    return true;
+                }
+                catch
+                {
+                    part = new CompositeKeyPart(CompositeKeyPartKind.NumericDouble, 0m, value, 0L, false, null);
+                    return true;
+                }
+            }
+
+            private static bool TryParseNumericString(string input, out CompositeKeyPart part)
+            {
+                if (decimal.TryParse(input, NumberStyles.Any, CultureInfo.InvariantCulture, out var dec))
+                {
+                    part = new CompositeKeyPart(CompositeKeyPartKind.NumericDecimal, dec, 0d, 0L, false, null);
+                    return true;
+                }
+
+                if (double.TryParse(input, NumberStyles.Any, CultureInfo.InvariantCulture, out var dbl))
+                {
+                    part = new CompositeKeyPart(CompositeKeyPartKind.NumericDouble, 0m, dbl, 0L, false, null);
+                    return true;
+                }
+
+                part = default;
+                return false;
+            }
+
+            private static long NormalizeDateTicks(DateTime value)
+            {
+                if (value.Kind == DateTimeKind.Unspecified)
+                    value = DateTime.SpecifyKind(value, DateTimeKind.Utc);
+                else
+                    value = value.ToUniversalTime();
+
+                return value.Ticks;
+            }
+        }
+
+        private readonly struct CompositeKey : IEquatable<CompositeKey>
+        {
+            private readonly CompositeKeyPart[] _parts;
+
+            public CompositeKey(CompositeKeyPart[] parts)
+            {
+                _parts = parts;
+            }
+
+            public bool Equals(CompositeKey other)
+            {
+                if (_parts.Length != other._parts.Length)
+                    return false;
+
+                for (var i = 0; i < _parts.Length; i++)
+                {
+                    if (!_parts[i].Equals(other._parts[i]))
+                        return false;
+                }
+
+                return true;
+            }
+
+            public override bool Equals(object? obj)
+                => obj is CompositeKey other && Equals(other);
+
+            public override int GetHashCode()
+            {
+                var hash = new HashCode();
+                foreach (var part in _parts)
+                    hash.Add(part);
+                return hash.ToHashCode();
+            }
+        }
+
+        private sealed class CompositeKeyComparer : IEqualityComparer<CompositeKey>
+        {
+            public static readonly CompositeKeyComparer Instance = new();
+
+            public bool Equals(CompositeKey x, CompositeKey y) => x.Equals(y);
+
+            public int GetHashCode(CompositeKey obj) => obj.GetHashCode();
         }
 
         private static object?[] BuildJoinRow(DataFrame left, DataFrame right, long leftRow, long rightRow, IReadOnlyList<JoinColumn> rightColumns)
@@ -1262,8 +1499,28 @@ public sealed class AtomicDataEngine
                 BooleanDataFrameColumn => new BooleanDataFrameColumn(name, length),
                 DateTimeDataFrameColumn => new DateTimeDataFrameColumn(name, length),
                 StringDataFrameColumn => new StringDataFrameColumn(name, length),
-                _ => new StringDataFrameColumn(name, length)
+                _ => CreateFallbackColumn(c, name, length)
             };
+        }
+
+        private static DataFrameColumn CreateFallbackColumn(DataFrameColumn c, string name, long length)
+        {
+            if (c.DataType == typeof(DateTime))
+                return new DateTimeDataFrameColumn(name, length);
+
+            var columnType = c.GetType();
+            var ctor = columnType.GetConstructor(new[] { typeof(string), typeof(long) });
+            if (ctor is not null)
+                return (DataFrameColumn)ctor.Invoke(new object?[] { name, length });
+
+            if (length <= int.MaxValue)
+            {
+                ctor = columnType.GetConstructor(new[] { typeof(string), typeof(int) });
+                if (ctor is not null)
+                    return (DataFrameColumn)ctor.Invoke(new object?[] { name, (int)length });
+            }
+
+            return new StringDataFrameColumn(name, length);
         }
 
         private static bool TryGetColumn(DataFrame df, string name, out DataFrameColumn col)

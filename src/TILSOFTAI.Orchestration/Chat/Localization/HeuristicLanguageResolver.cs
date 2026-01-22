@@ -1,6 +1,5 @@
 using System.Text.RegularExpressions;
 using TILSOFTAI.Orchestration.Llm;
-using TILSOFTAI.Orchestration.SK.Conversation;
 
 namespace TILSOFTAI.Orchestration.Chat.Localization;
 
@@ -21,7 +20,7 @@ public sealed class HeuristicLanguageResolver : ILanguageResolver
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
 
-    public ChatLanguage Resolve(IReadOnlyCollection<ChatCompletionMessage> incomingMessages, ConversationState? conversationState)
+    public ChatLanguage Resolve(IReadOnlyCollection<ChatCompletionMessage> incomingMessages)
     {
         // Use the last non-empty user message as primary signal.
         var lastUser = incomingMessages.LastOrDefault(m =>
@@ -33,12 +32,6 @@ public sealed class HeuristicLanguageResolver : ILanguageResolver
             if (ContainsVietnameseDiacritics(lastUser)) return ChatLanguage.Vi;
             if (ViSignals.IsMatch(lastUser)) return ChatLanguage.Vi;
             if (EnSignals.IsMatch(lastUser)) return ChatLanguage.En;
-        }
-
-        // Fall back to stored preference for the conversation.
-        if (!string.IsNullOrWhiteSpace(conversationState?.PreferredLanguage))
-        {
-            return ChatLanguageExtensions.FromIsoCode(conversationState.PreferredLanguage);
         }
 
         // Default to English.

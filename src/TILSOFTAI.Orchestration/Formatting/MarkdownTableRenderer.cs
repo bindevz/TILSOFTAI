@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Text;
 using TILSOFTAI.Application.Services;
 using TILSOFTAI.Domain.ValueObjects;
+using TILSOFTAI.Orchestration.Chat.Localization;
 
 namespace TILSOFTAI.Orchestration.Formatting;
 
@@ -9,14 +11,49 @@ public sealed class MarkdownTableRenderOptions
     public int MaxRows { get; set; } = 20;
     public int MaxColumns { get; set; } = 12;
     public int MaxCellChars { get; set; } = 80;
+    public string? TruncationNoteTemplate { get; set; }
 }
 
 public sealed class MarkdownTableRenderer
 {
+    private static readonly IChatTextLocalizer Localizer = new DefaultChatTextLocalizer();
+
     public static string Render(
         IReadOnlyList<string>? columns,
         IEnumerable<object?[]>? rows,
-        MarkdownTableRenderOptions? options = null)
+        MarkdownTableRenderOptions? options = null,
+        ChatLanguage? language = null)
+    {
+        return RenderCore(columns, rows, totalCountOverride: null, options, language);
+    }
+
+    public static string Render(TabularData table, MarkdownTableRenderOptions? options = null, ChatLanguage? language = null)
+    {
+        if (table is null)
+            return RenderCore(Array.Empty<string>(), Array.Empty<object?[]>(), null, options, language);
+
+        var cols = table.Columns.Select(c => c.Name).ToList();
+        return RenderCore(cols, table.Rows, table.TotalCount, options, language);
+    }
+
+    public static string Render(AnalyticsSchema schema, IEnumerable<object?[]> rows, MarkdownTableRenderOptions? options = null, ChatLanguage? language = null)
+    {
+        if (schema is null)
+            return RenderCore(Array.Empty<string>(), rows, null, options, language);
+
+        var cols = schema.Columns
+            .Select(c => string.IsNullOrWhiteSpace(c.DisplayName) ? c.Name : c.DisplayName)
+            .ToList();
+
+        return RenderCore(cols, rows, null, options, language);
+    }
+
+    private static string RenderCore(
+        IReadOnlyList<string>? columns,
+        IEnumerable<object?[]>? rows,
+        int? totalCountOverride,
+        MarkdownTableRenderOptions? options,
+        ChatLanguage? language)
     {
         options ??= new MarkdownTableRenderOptions();
 
@@ -48,6 +85,9 @@ public sealed class MarkdownTableRenderer
             }
         }
 
+        if (totalCountOverride is int overrideCount && overrideCount > totalRows)
+            totalRows = overrideCount;
+
         var colList = BuildColumns(columns, rowList, maxCols);
 
         var sb = new StringBuilder();
@@ -67,31 +107,29 @@ public sealed class MarkdownTableRenderer
 
         if (totalRows > rowList.Count)
         {
-            sb.AppendLine($"_Đã hiển thị {rowList.Count}/{totalRows} dòng._");
+            var noteTemplate = options.TruncationNoteTemplate;
+            if (string.IsNullOrWhiteSpace(noteTemplate))
+            {
+                var lang = language ?? ChatLanguage.En;
+                noteTemplate = Localizer.Get(ChatTextKeys.TableTruncationNote, lang);
+            }
+
+            var note = FormatTruncationNote(noteTemplate ?? string.Empty, rowList.Count, totalRows);
+            if (!string.IsNullOrWhiteSpace(note))
+                sb.AppendLine($"_{note}_");
         }
 
         return sb.ToString().TrimEnd();
     }
 
-    public static string Render(TabularData table, MarkdownTableRenderOptions? options = null)
+    private static string FormatTruncationNote(string template, int shown, int total)
     {
-        if (table is null)
-            return Render(Array.Empty<string>(), Array.Empty<object?[]>(), options);
+        if (string.IsNullOrWhiteSpace(template))
+            return string.Empty;
 
-        var cols = table.Columns.Select(c => c.Name).ToList();
-        return Render(cols, table.Rows, options);
-    }
-
-    public static string Render(AnalyticsSchema schema, IEnumerable<object?[]> rows, MarkdownTableRenderOptions? options = null)
-    {
-        if (schema is null)
-            return Render(Array.Empty<string>(), rows, options);
-
-        var cols = schema.Columns
-            .Select(c => string.IsNullOrWhiteSpace(c.DisplayName) ? c.Name : c.DisplayName)
-            .ToList();
-
-        return Render(cols, rows, options);
+        return template
+            .Replace("{shown}", shown.ToString(CultureInfo.InvariantCulture))
+            .Replace("{total}", total.ToString(CultureInfo.InvariantCulture));
     }
 
     private static List<string> BuildColumns(IReadOnlyList<string>? columns, List<object?[]> rowList, int maxCols)

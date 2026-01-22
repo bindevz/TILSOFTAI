@@ -2,17 +2,13 @@ using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using System.Security;
 using System.Text.Json;
-using System.Text.Json.Nodes;
-using TILSOFTAI.Orchestration;
 using TILSOFTAI.Orchestration.Chat;
 using TILSOFTAI.Application.Permissions;
 using TILSOFTAI.Orchestration.Contracts;
 using TILSOFTAI.Orchestration.Contracts.Evidence;
 using TILSOFTAI.Orchestration.Contracts.Validation;
 using TILSOFTAI.Orchestration.Llm;
-using TILSOFTAI.Orchestration.SK.Conversation;
 using TILSOFTAI.Orchestration.Tools;
-using TILSOFTAI.Orchestration.Tools.Filters;
 
 namespace TILSOFTAI.Orchestration.SK;
 
@@ -23,9 +19,6 @@ public sealed class ToolInvoker
     private readonly ToolDispatcher _dispatcher;
     private readonly RbacService _rbac;
     private readonly ExecutionContextAccessor _ctx;
-    private readonly OrchestrationOptions _options;
-    private readonly IConversationStateStore _conversationState;
-    private readonly IFilterPatchMerger _filterPatchMerger;
     private readonly IResponseSchemaValidator _responseSchemaValidator;
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
 
@@ -34,9 +27,6 @@ public sealed class ToolInvoker
         ToolDispatcher dispatcher,
         RbacService rbac,
         ExecutionContextAccessor ctx,
-        OrchestrationOptions options,
-        IConversationStateStore conversationState,
-        IFilterPatchMerger filterPatchMerger,
         IResponseSchemaValidator responseSchemaValidator,
         ILogger<ToolInvoker> logger)
     {
@@ -44,9 +34,6 @@ public sealed class ToolInvoker
         _dispatcher = dispatcher;
         _rbac = rbac;
         _ctx = ctx;
-        _options = options;
-        _conversationState = conversationState;
-        _filterPatchMerger = filterPatchMerger;
         _responseSchemaValidator = responseSchemaValidator;
         _logger = logger;
     }
@@ -108,11 +95,6 @@ public sealed class ToolInvoker
                     }), sw.ElapsedMilliseconds);
             }
 
-            // Conversation-aware filter patching (ver19)
-            // If the model only specifies delta filters for a follow-up turn, merge with the
-            // last successful query's canonical filters.
-            args = await MergeConversationFiltersIfNeededAsync(toolName, args, ct);
-
             if (!_registry.IsWhitelisted(toolName))
             {
                 policy = EnvelopePolicyV1.Deny(_ctx.Context, "TOOL_NOT_ALLOWED");
@@ -169,13 +151,15 @@ public sealed class ToolInvoker
 
             if (!dispatchResult.Result.Success)
             {
-                policy = EnvelopePolicyV1.Deny(_ctx.Context, "TOOL_EXECUTION_FAILED");
-                _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code=TOOL_EXECUTION_FAILED ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
+                var failure = ExtractToolFailure(dispatchResult.Result);
+                policy = EnvelopePolicyV1.Deny(_ctx.Context, failure.Code);
+                _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code={Code} ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, failure.Code, sw.ElapsedMilliseconds);
                 return LogAndReturn(EnvelopeV1.Failure(toolName, requiresWrite, _ctx.Context,
                     telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                     policy: policy,
-                    code: "TOOL_EXECUTION_FAILED",
-                    message: dispatchResult.Result.Message,
+                    code: failure.Code,
+                    message: failure.Message,
+                    details: failure.Details,
                     normalizedIntent: normalizedIntent,
                     source: source,
                     evidence: evidence), sw.ElapsedMilliseconds);
@@ -185,9 +169,6 @@ public sealed class ToolInvoker
             // Ensures tool handlers cannot drift away from governance/contracts.
             lastPayload = dispatchResult.Result.Data;
             _responseSchemaValidator.ValidateOrThrow(lastPayload, toolName);
-
-            // Update conversation state for follow-up turns (only for successful READ queries)
-            await TryUpdateConversationStateAsync(toolName, normalizedIntent, requiresWrite, ct);
 
             // Fallback (anti-loop): if the handler did not attach evidence, synthesize a compact one.
             // Some clients/UI layers render only envelope.evidence; returning an empty list causes
@@ -245,49 +226,6 @@ public sealed class ToolInvoker
         }
     }
 
-    private async Task<JsonElement> MergeConversationFiltersIfNeededAsync(string toolName, JsonElement args, CancellationToken ct)
-    {
-        // Only tools that accept a "filters" argument participate.
-        if (args.ValueKind != JsonValueKind.Object)
-            return args;
-
-        if (!_options.EnableFilterPatching)
-            return args;
-
-        if (!args.TryGetProperty("reusePreviousFilters", out var reuseEl) || reuseEl.ValueKind != JsonValueKind.True)
-            return args;
-
-        if (!args.TryGetProperty("filters", out var filtersElement))
-            return args;
-
-        var patchFilters = ParseFilters(filtersElement);
-
-        // If there is no conversation id, do nothing.
-        if (string.IsNullOrWhiteSpace(_ctx.Context.ConversationId))
-            return args;
-
-        var state = await _conversationState.TryGetAsync(_ctx.Context, ct);
-        var last = state?.LastQuery;
-        if (last is null || last.Filters.Count == 0)
-            return args;
-
-        // Merge only when the module matches (e.g., models.*)
-        if (!IsSameModule(last.Resource, toolName))
-            return args;
-
-        var merged = _filterPatchMerger.Merge(toolName, last.Filters, patchFilters).Merged;
-
-        // Rewrite args JSON with merged filters while keeping the rest intact.
-        var node = JsonNode.Parse(args.GetRawText()) as JsonObject;
-        if (node is null)
-            return args;
-
-        node["filters"] = JsonSerializer.SerializeToNode(merged, _json);
-
-        using var doc = JsonDocument.Parse(node.ToJsonString(_json));
-        return doc.RootElement.Clone();
-    }
-
     private object LogAndReturn(EnvelopeV1 envelope, long durationMs)
     {
         var compaction = ToolResultCompactor.CompactEnvelopeWithMetadata(envelope);
@@ -308,72 +246,101 @@ public sealed class ToolInvoker
         return envelope;
     }
 
+    private sealed record ToolFailure(string Code, string Message, object? Details);
+
+    private static ToolFailure ExtractToolFailure(ToolExecutionResult result)
+    {
+        var code = "TOOL_EXECUTION_FAILED";
+        var message = string.IsNullOrWhiteSpace(result.Message) ? "Tool execution failed." : result.Message;
+        var details = result.Data;
+
+        if (TryExtractFailureDetails(result.Data, out var extractedCode, out var extractedMessage))
+        {
+            if (!string.IsNullOrWhiteSpace(extractedCode))
+                code = extractedCode!;
+
+            if (!string.IsNullOrWhiteSpace(extractedMessage))
+                message = extractedMessage!;
+        }
+
+        return new ToolFailure(code, message, details);
+    }
+
+    private static bool TryExtractFailureDetails(object? details, out string? code, out string? message)
+    {
+        code = null;
+        message = null;
+
+        if (details is null)
+            return false;
+
+        JsonElement root;
+        if (details is JsonElement element)
+        {
+            root = element;
+        }
+        else
+        {
+            try
+            {
+                root = JsonSerializer.SerializeToElement(details, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        if (TryReadError(root, out code, out message))
+            return true;
+
+        if (root.ValueKind == JsonValueKind.Object &&
+            root.TryGetProperty("data", out var dataEl) &&
+            TryReadError(dataEl, out code, out message))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryReadError(JsonElement node, out string? code, out string? message)
+    {
+        code = null;
+        message = null;
+
+        if (node.ValueKind != JsonValueKind.Object)
+            return false;
+
+        if (node.TryGetProperty("error", out var errorEl) && errorEl.ValueKind == JsonValueKind.Object)
+        {
+            TryGetString(errorEl, "code", out code);
+            TryGetString(errorEl, "message", out message);
+            if (!string.IsNullOrWhiteSpace(code) || !string.IsNullOrWhiteSpace(message))
+                return true;
+        }
+
+        TryGetString(node, "code", out code);
+        TryGetString(node, "message", out message);
+        return !string.IsNullOrWhiteSpace(code) || !string.IsNullOrWhiteSpace(message);
+    }
+
+    private static bool TryGetString(JsonElement node, string propertyName, out string? value)
+    {
+        value = null;
+        if (!node.TryGetProperty(propertyName, out var prop) || prop.ValueKind != JsonValueKind.String)
+            return false;
+
+        value = prop.GetString();
+        return !string.IsNullOrWhiteSpace(value);
+    }
+
     private static string? TryGetDatasetId(object? normalizedIntent)
     {
         if (normalizedIntent is DynamicToolIntent dyn)
             return dyn.GetString("datasetId");
 
         return null;
-    }
-
-    private async Task TryUpdateConversationStateAsync(string toolName, object? normalizedIntent, bool requiresWrite, CancellationToken ct)
-    {
-        if (requiresWrite)
-            return;
-
-        // Only cache dynamic queries that actually carry filters.
-        if (normalizedIntent is not DynamicToolIntent dyn)
-            return;
-
-        if (dyn.Filters is null)
-            return;
-
-        // Canonicalize again defensively by reusing the merger on an empty base.
-        var merged = _filterPatchMerger.Merge(toolName,
-            baseFilters: new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase),
-            patchFilters: dyn.Filters).Merged;
-
-        var state = new ConversationState
-        {
-            LastQuery = new ConversationQueryState
-            {
-                Resource = toolName,
-                ToolName = toolName,
-                Filters = merged,
-                UpdatedAtUtc = DateTimeOffset.UtcNow
-            }
-        };
-
-        await _conversationState.UpsertAsync(_ctx.Context, state, ct);
-    }
-
-    private static bool IsSameModule(string resourceA, string resourceB)
-    {
-        var a = (resourceA ?? string.Empty).Split('.', 2)[0];
-        var b = (resourceB ?? string.Empty).Split('.', 2)[0];
-        return !string.IsNullOrWhiteSpace(a) && string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static Dictionary<string, string?> ParseFilters(JsonElement filtersElement)
-    {
-        var dict = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        if (filtersElement.ValueKind != JsonValueKind.Object)
-            return dict;
-
-        foreach (var p in filtersElement.EnumerateObject())
-        {
-            dict[p.Name] = p.Value.ValueKind switch
-            {
-                JsonValueKind.String => p.Value.GetString(),
-                JsonValueKind.Number => p.Value.ToString(),
-                JsonValueKind.True => "true",
-                JsonValueKind.False => "false",
-                JsonValueKind.Null => null,
-                _ => p.Value.ToString()
-            };
-        }
-
-        return dict;
     }
 
     private static string? TryGetPayloadKind(object? payload)

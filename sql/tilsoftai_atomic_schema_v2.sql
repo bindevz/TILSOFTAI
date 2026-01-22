@@ -55,6 +55,7 @@ BEGIN
         ExampleJson          NVARCHAR(MAX) NULL,
 
         -- Schema hints for join graph + semantic roles (JSON object)
+        -- Expected: { "resultSets":[ { "rsIndex":2, "datasetName":"sales_engine", "delivery":"engine", "tableKind":"fact" } ], "tables":[ ... ] }
         SchemaHintsJson      NVARCHAR(MAX) NULL,
 
         UpdatedAtUtc         DATETIME2(0) NOT NULL
@@ -298,6 +299,10 @@ VALUES
         { "q":"Top collections by revenue", "notes":"Group by collectionName and sort desc sum(amount)" }
     ]'',
     N''{
+        "resultSets":[
+            { "rsIndex":2, "datasetName":"sales_engine", "delivery":"engine", "tableKind":"fact" },
+            { "rsIndex":3, "datasetName":"collections_engine", "delivery":"engine", "tableKind":"dim" }
+        ],
         "tables":[
             {
                 "tableName":"sales_engine",

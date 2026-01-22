@@ -1,9 +1,11 @@
-﻿namespace TILSOFTAI.Orchestration.SK;
+using TILSOFTAI.Orchestration.Chat.Localization;
+
+namespace TILSOFTAI.Orchestration.SK;
 
 public sealed class ExecutionContextAccessor
 {
     public TILSOFTAI.Domain.ValueObjects.TSExecutionContext Context { get; set; }
-    public string? ConfirmedConfirmationId { get; set; } // parse từ user message
+    public string? ConfirmedConfirmationId { get; set; } // parse t? user message
 
     // Last-known answer hints gathered during tool execution within this request.
     // This allows ChatPipeline to return a deterministic fallback response when the
@@ -21,6 +23,7 @@ public sealed class ExecutionContextAccessor
     public string? LastEngineDatasetsDigestJson { get; set; }
     public string? LastListPreviewTitle { get; set; }
     public string? LastInsightPreviewTitle { get; set; }
+    public ChatLanguage ResponseLanguage { get; set; } = ChatLanguage.En;
 
     // Per-request circuit breaker state for auto tool invocation
     public int AutoInvokeCount { get; set; }

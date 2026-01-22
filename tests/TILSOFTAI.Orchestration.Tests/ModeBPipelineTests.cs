@@ -14,9 +14,7 @@ using TILSOFTAI.Orchestration.Contracts.Validation;
 using TILSOFTAI.Orchestration.Llm;
 using TILSOFTAI.Orchestration.Llm.OpenAi;
 using TILSOFTAI.Orchestration.SK;
-using TILSOFTAI.Orchestration.SK.Conversation;
 using TILSOFTAI.Orchestration.Tools;
-using TILSOFTAI.Orchestration.Tools.Filters;
 using TILSOFTAI.Orchestration.Tools.Modularity;
 using TILSOFTAI.Orchestration.Tools.ToolSchemas;
 using Xunit;
@@ -197,20 +195,14 @@ public sealed class ModeBPipelineTests
         var dispatcher = new ToolDispatcher(toolHandlers);
         var rbac = new RbacService();
         var ctxAccessor = new ExecutionContextAccessor();
-        var conversationStore = new InMemoryConversationStateStore();
-        var filterPatchMerger = new FilterPatchMerger(new FilterCanonicalizer());
         var validationOptions = Options.Create(new ResponseSchemaValidationOptions { Enabled = false });
         var validator = new ResponseSchemaValidator(validationOptions, NullLogger<ResponseSchemaValidator>.Instance);
-        var options = new OrchestrationOptions { EnableFilterPatching = false };
 
         var toolInvoker = new ToolInvoker(
             registry,
             dispatcher,
             rbac,
             ctxAccessor,
-            options,
-            conversationStore,
-            filterPatchMerger,
             validator,
             NullLogger<ToolInvoker>.Instance);
 
@@ -228,7 +220,6 @@ public sealed class ModeBPipelineTests
             ctxAccessor,
             tokenBudget,
             auditLogger,
-            conversationStore,
             languageResolver,
             localizer,
             patterns,

@@ -16,27 +16,29 @@ public sealed class DefaultChatTextLocalizer : IChatTextLocalizer
         return key switch
         {
             ChatTextKeys.SystemPrompt => lang == ChatLanguage.En ? SystemPromptEn : SystemPromptVi,
-            ChatTextKeys.PreviousQueryHint => lang == ChatLanguage.En ? PreviousQueryHintEn : PreviousQueryHintVi,
             ChatTextKeys.FallbackNoContent => lang == ChatLanguage.En ? FallbackNoContentEn : FallbackNoContentVi,
+            ChatTextKeys.InsightBlockTitle => lang == ChatLanguage.En ? InsightBlockTitleEn : InsightBlockTitleVi,
+            ChatTextKeys.InsightPreviewTitle => lang == ChatLanguage.En ? InsightPreviewTitleEn : InsightPreviewTitleVi,
+            ChatTextKeys.ListPreviewTitle => lang == ChatLanguage.En ? ListPreviewTitleEn : ListPreviewTitleVi,
+            ChatTextKeys.TableTruncationNote => lang == ChatLanguage.En ? TableTruncationNoteEn : TableTruncationNoteVi,
             _ => throw new NotSupportedException($"Unsupported chat text key '{key}'.")
         };
     }
 
     // Keep prompts short: policies and deterministic guards live in code.
     private const string SystemPromptVi = """
-Bạn là trợ lý nghiệp vụ ERP.
+B?n l� tr? l� nghi?p v? ERP.
 
-Ngôn ngữ: Trả lời theo ngôn ngữ của người dùng (dựa trên tin nhắn gần nhất). Nếu không chắc, mặc định tiếng Anh.
+Ng�n ng?: Tr? l?i theo ng�n ng? c?a ngu?i d�ng (d?a tr�n tin nh?n g?n nh?t). N?u kh�ng ch?c, m?c d?nh ti?ng Anh.
 
-Quy tắc:
-- Khi người dùng cung cấp season dạng "24/25", "24-25", "2024/25"... hãy chuẩn hóa về "YYYY/YYYY" (ví dụ: "24/25" -> "2024/2025") trước khi điền vào tham số Season.
-- Nếu câu hỏi cần dữ liệu nội bộ (model/khách hàng/đơn hàng/giá/tồn kho...), hãy dùng các tool được cung cấp. Không bịa số liệu nếu chưa có evidence từ tool.
-- Nếu cần chạy stored procedure theo chuẩn AtomicQuery nhưng chưa chắc spName, hãy gọi atomic.catalog.search trước để tìm đúng spName rồi mới gọi atomic.query.execute.
-- Dùng analytics.run để phân tích; câu trả lời cuối chỉ là Insight text (không bằng markdown). Bảng xem trước do server render và ghép ngoài output.
-- Không dựa vào việc server tự gộp filters ngầm. Nếu muốn reuse filters trước (khi tool hỗ trợ filters), hãy đặt reusePreviousFilters=true.
-- Chỉ gọi các tool mà hệ thống cung cấp.
-- Thao tác ghi phải theo 2 bước: prepare -> yêu cầu người dùng xác nhận -> commit.
-- Người dùng xác nhận bằng: XÁC NHẬN <confirmation_id>.
+Quy t?c:
+- Khi ngu?i d�ng cung c?p season d?ng "24/25", "24-25", "2024/25"... h�y chu?n h�a v? "YYYY/YYYY" (v� d?: "24/25" -> "2024/2025") tru?c khi di?n v�o tham s? Season.
+- N?u c�u h?i c?n d? li?u n?i b? (model/kh�ch h�ng/don h�ng/gi�/t?n kho...), h�y d�ng c�c tool du?c cung c?p. Kh�ng b?a s? li?u n?u chua c� evidence t? tool.
+- N?u c?n ch?y stored procedure theo chu?n AtomicQuery nhung chua ch?c spName, h�y g?i atomic.catalog.search tru?c d? t�m d�ng spName r?i m?i g?i atomic.query.execute.
+- D�ng analytics.run d? ph�n t�ch; c�u tr? l?i cu?i ch? l� Insight text (kh�ng b?ng markdown). B?ng xem tru?c do server render v� gh�p ngo�i output.
+- Ch? g?i c�c tool m� h? th?ng cung c?p.
+- Thao t�c ghi ph?i theo 2 bu?c: prepare -> y�u c?u ngu?i d�ng x�c nh?n -> commit.
+- Ngu?i d�ng x�c nh?n b?ng: X�C NH?N <confirmation_id>.
 """;
 
     private const string SystemPromptEn = """
@@ -49,16 +51,24 @@ Rules:
 - If the question requires internal data (models/customers/orders/prices/inventory...), use the provided tools. Do not fabricate numbers without tool evidence.
 - If you need to execute an AtomicQuery stored procedure but are not sure about spName, call atomic.catalog.search first to find the best spName, then call atomic.query.execute.
 - Use analytics.run to execute analysis; the final response must be Insight text only (no markdown tables). Previews are server-rendered and appended outside the model output.
-- Do not rely on server-side filter merging. If you want to reuse prior query filters, set reusePreviousFilters=true explicitly.
 - Only call tools that the system provides.
 - Write operations must be 2-step: prepare -> ask the user to confirm -> commit.
-- User confirms with: CONFIRM <confirmation_id> (or XÁC NHẬN <confirmation_id>).
+- User confirms with: CONFIRM <confirmation_id> (or X�C NH?N <confirmation_id>).
 """;
 
-    private const string PreviousQueryHintVi = "Ngữ cảnh truy vấn trước đó (dùng để hiểu câu hỏi nối tiếp): ";
-    private const string PreviousQueryHintEn = "Previous query context (to understand the follow-up question): ";
-
     // Last-resort response to avoid sending an empty assistant message to the client.
-    private const string FallbackNoContentVi = "Tôi chưa thể tạo câu trả lời ở thời điểm này. Vui lòng thử lại hoặc cung cấp thêm chi tiết.";
+    private const string FallbackNoContentVi = "Hi?n t?i t�i chua th? t?o c�u tr? l?i. Vui l�ng th? l?i ho?c cung c?p th�m chi ti?t.";
     private const string FallbackNoContentEn = "I could not produce an answer at this time. Please retry or provide more details.";
+
+    private const string InsightBlockTitleVi = "K?t lu?n / Insight";
+    private const string InsightBlockTitleEn = "Conclusion / Insight";
+
+    private const string InsightPreviewTitleVi = "Preview d? li?u c?a K?t lu?n / Insight";
+    private const string InsightPreviewTitleEn = "Insight Preview";
+
+    private const string ListPreviewTitleVi = "Preview danh s�ch";
+    private const string ListPreviewTitleEn = "List Preview";
+
+    private const string TableTruncationNoteVi = "�� hi?n th? {shown}/{total} d�ng.";
+    private const string TableTruncationNoteEn = "Showing {shown}/{total} rows.";
 }
