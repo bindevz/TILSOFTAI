@@ -1,0 +1,30 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=8.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=8.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <data name="Error_GatewayTimeout" xml:space="preserve">
+    <value>Gateway timeout.</value>
+  </data>
+  <data name="Error_BadGateway" xml:space="preserve">
+    <value>Bad gateway.</value>
+  </data>
+  <data name="Error_InternalServerError" xml:space="preserve">
+    <value>Internal server error.</value>
+  </data>
+  <data name="Error_BadRequest" xml:space="preserve">
+    <value>Bad request.</value>
+  </data>
+  <data name="Error_RateLimitExceeded" xml:space="preserve">
+    <value>Rate limit exceeded.</value>
+  </data>
+</root>

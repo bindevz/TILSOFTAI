@@ -6,7 +6,7 @@ using TILSOFTAI.Configuration;
 using TILSOFTAI.Domain.ValueObjects;
 using TILSOFTAI.Orchestration.Chat.Localization;
 using TILSOFTAI.Orchestration.Formatting;
-using TILSOFTAI.Orchestration.SK;
+using TILSOFTAI.Orchestration.Execution;
 using TILSOFTAI.Orchestration.Contracts;
 using TILSOFTAI.Orchestration.Tools;
 using TILSOFTAI.Orchestration.Tools.Modularity;
@@ -106,15 +106,16 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
             return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateSuccess("atomic.query.execute blocked", payloadEx), blockedExtras);
         }
+        var limits = _settings.Orchestration.AtomicQueryLimits;
         var readOptions = new AtomicQueryReadOptions(
-            MaxRowsPerTable: dyn.GetInt("maxRowsPerTable", 20000),
-            MaxRowsSummary: dyn.GetInt("maxRowsSummary", 500),
-            MaxSchemaRows: dyn.GetInt("maxSchemaRows", 50000),
-            MaxTables: dyn.GetInt("maxTables", 20));
+            MaxRowsPerTable: limits.MaxRowsPerTable,
+            MaxRowsSummary: limits.MaxRowsSummary,
+            MaxSchemaRows: limits.MaxSchemaRows,
+            MaxTables: limits.MaxTables);
 
-        var maxColumns = dyn.GetInt("maxColumns", 100);
-        var previewRows = dyn.GetInt("previewRows", 100);
-        var maxDisplayRows = dyn.GetInt("maxDisplayRows", 2000);
+        var maxColumns = limits.MaxColumns;
+        var previewRows = limits.PreviewRows;
+        var maxDisplayRows = limits.MaxDisplayRows;
 
         var routing = RoutingPolicyOptions.Default with
         {
@@ -173,13 +174,19 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         var atomic = await _atomicQueryService.ExecuteAsync(spName, normalizedParams, readOptions, cancellationToken);
 
         // Summary (RS1) is always safe to display (bounded by MaxRowsSummary).
+        TabularData? summaryTablePayload = null;
+        if (atomic.Summary is not null)
+        {
+            var trimmedSummary = TrimColumns(atomic.Summary.Table, maxColumns);
+            summaryTablePayload = new TabularData(trimmedSummary.Columns, Array.Empty<object?[]>(), trimmedSummary.TotalCount);
+        }
         var summaryPayload = atomic.Summary is null ? null : new
         {
             index = atomic.Summary.Schema.Index,
             tableName = atomic.Summary.Schema.TableName,
             tableKind = atomic.Summary.Schema.TableKind,
             schema = atomic.Summary.Schema,
-            table = TrimColumns(atomic.Summary.Table, maxColumns),
+            table = summaryTablePayload,
             effectiveParams = BuildEffectiveParamsEcho(normalizedParams)
         };
 
@@ -275,29 +282,13 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
                     listPreviewTable = trimmedTable;
                 }
 
-                var displayTrunc = new
-                {
-                    rows = new { returned = Math.Min(trimmedTable.Rows.Count, routing.MaxDisplayRows), max = routing.MaxDisplayRows, original = trimmedTable.Rows.Count },
-                    columns = new { returned = trimmedTable.Columns.Count, max = maxColumns, original = t.Table.Columns.Count }
-                };
-
-                var displayPayload = new TabularData(trimmedTable.Columns, Array.Empty<object?[]>(), trimmedTable.TotalCount);
-
                 displayTables.Add(new
                 {
                     index = t.Schema.Index,
                     tableName = meta.TableName,
                     tableKind = meta.TableKind,
                     delivery = meta.Delivery,
-                    grain = t.Schema.Grain,
-                    primaryKey,
-                    joinHints,
-                    description_vi = t.Schema.DescriptionVi,
-                    description_en = t.Schema.DescriptionEn,
-                    schema = t.Schema,
                     routingReason = decision.Reason,
-                    truncation = displayTrunc,
-                    table = displayPayload,
                     rowsReturned = trimmedTable.Rows.Count,
                     columnCount = trimmedTable.Columns.Count
                 });
@@ -343,20 +334,10 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
                     engineDatasets.Add(new
                     {
-                        index = t.Schema.Index,
-                        tableName = meta.TableName,
-                        tableKind = meta.TableKind,
-                        delivery = meta.Delivery,
-                        routingReason = decision.Reason,
                         datasetId = dataset.DatasetId,
+                        tableName = meta.TableName,
                         expiresAtUtc = dataset.ExpiresAtUtc,
-                        semanticSchema = t.Schema,
-                        dataSchema = dataset.Schema,
-                        preview = new
-                        {
-                            columns = dataset.Schema.Select(c => c.Name),
-                            rows = Array.Empty<object?[]>()
-                        }
+                        routingReason = decision.Reason
                     });
                 }
             }
@@ -406,7 +387,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
                     intent = new { vi = catalogEntry.IntentVi, en = catalogEntry.IntentEn },
                     tags = catalogEntry.Tags
                 },
-                schema = atomic.Schema,
+                schema = schemaDigest,
                 summary = summaryPayload,
                 displayTables,
                 engineDatasets

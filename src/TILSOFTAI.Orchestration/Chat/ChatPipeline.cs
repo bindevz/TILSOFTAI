@@ -11,7 +11,7 @@ using TILSOFTAI.Orchestration.Chat.Localization;
 using TILSOFTAI.Orchestration.Llm;
 using TILSOFTAI.Orchestration.Llm.OpenAi;
 using TILSOFTAI.Orchestration.Formatting;
-using TILSOFTAI.Orchestration.SK;
+using TILSOFTAI.Orchestration.Execution;
 using TILSOFTAI.Orchestration.Tools;
 
 namespace TILSOFTAI.Orchestration.Chat;
@@ -216,7 +216,10 @@ public sealed class ChatPipeline
 
                 TryCaptureToolArtifacts(toolResultJson, previewRowLimit);
 
-                var compactJson = ToolResultCompactor.CompactEnvelopeJson(toolResultJson, ResolveMaxToolResultBytes());
+                var compactJson = ToolResultCompactor.CompactEnvelopeJson(
+                    toolResultJson,
+                    ResolveMaxToolResultBytes(),
+                    _settings.Chat.CompactionLimits);
                 messages.Add(new OpenAiChatMessage
                 {
                     Role = "tool",

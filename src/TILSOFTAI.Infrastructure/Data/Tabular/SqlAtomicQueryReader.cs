@@ -114,59 +114,32 @@ public static class SqlAtomicQueryReader
     private static string? GuessTableKind(TabularData table, IReadOnlyList<TableKindSignalRow>? signals)
     {
         if (table.Rows is null || table.Rows.Count == 0) return null;
+        if (signals is null || signals.Count == 0) return null;
 
-        // Heuristic: summary tables are usually very small and contain common control/count fields.
-        if (table.Rows.Count <= 5)
+        var names = table.Columns
+            .Select(c => c.Name)
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Select(n => n.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var scoreByKind = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in signals.OrderBy(x => x.Priority))
         {
-            var names = table.Columns
-                .Select(c => c.Name)
-                .Where(n => !string.IsNullOrWhiteSpace(n))
-                .Select(n => n.Trim())
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrWhiteSpace(s.TableKind) || string.IsNullOrWhiteSpace(s.Pattern))
+                continue;
 
-            // Prefer SQL-configured signals if provided.
-            if (signals is not null && signals.Count > 0)
-            {
-                var scoreByKind = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-                foreach (var s in signals.OrderBy(x => x.Priority))
-                {
-                    if (string.IsNullOrWhiteSpace(s.TableKind) || string.IsNullOrWhiteSpace(s.Pattern))
-                        continue;
+            if (!scoreByKind.TryGetValue(s.TableKind, out var score))
+                score = 0;
 
-                    if (!scoreByKind.TryGetValue(s.TableKind, out var score))
-                        score = 0;
+            if (MatchesAny(names, s))
+                score += Math.Max(0, s.Weight);
 
-                    if (MatchesAny(names, s))
-                        score += Math.Max(0, s.Weight);
-
-                    scoreByKind[s.TableKind] = score;
-                }
-
-                // Threshold is intentionally conservative; we only want to classify summary confidently.
-                if (scoreByKind.TryGetValue("summary", out var summaryScore) && summaryScore >= 5)
-                    return "summary";
-            }
-            else
-            {
-                // Generic, module-agnostic signals.
-                var generic = new[]
-                {
-                    "totalcount", "rowcount", "count", "isdatasetmode",
-                    "page", "size", "enginerows", "displayrows"
-                };
-
-                if (generic.Any(s => names.Contains(s)))
-                    return "summary";
-
-                // Column suffix pattern commonly used for summary filters.
-                if (names.Any(n => n.EndsWith("filter", StringComparison.OrdinalIgnoreCase)))
-                    return "summary";
-            }
-
-            // Fallback: if it has only a few scalar columns, treat as summary.
-            if (table.Columns.Count <= 12)
-                return "summary";
+            scoreByKind[s.TableKind] = score;
         }
+
+        // Threshold is intentionally conservative; we only want to classify summary confidently.
+        if (scoreByKind.TryGetValue("summary", out var summaryScore) && summaryScore >= 5)
+            return "summary";
 
         return null;
     }

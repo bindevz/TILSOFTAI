@@ -6,7 +6,7 @@ using TILSOFTAI.Domain.ValueObjects;
 using TILSOFTAI.Orchestration.Chat.Localization;
 using TILSOFTAI.Orchestration.Contracts;
 using TILSOFTAI.Orchestration.Formatting;
-using TILSOFTAI.Orchestration.SK;
+using TILSOFTAI.Orchestration.Execution;
 using TILSOFTAI.Orchestration.Tools;
 using TILSOFTAI.Orchestration.Tools.Modularity;
 
@@ -40,10 +40,11 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
         var pipeline = dyn.GetJsonRequired("pipeline");
         var persistResult = dyn.GetBool("persistResult", false);
 
+        var topN = Math.Clamp(dyn.GetInt("topN", 20), 1, 200);
         var bounds = new AnalyticsService.RunBounds(
-            TopN: dyn.GetInt("topN", 20),
-            MaxGroups: dyn.GetInt("maxGroups", _settings.AnalyticsEngine.MaxGroups),
-            MaxResultRows: dyn.GetInt("maxResultRows", 500),
+            TopN: topN,
+            MaxGroups: _settings.AnalyticsEngine.MaxGroups,
+            MaxResultRows: _settings.AnalyticsEngine.MaxResultRows,
             MaxJoinRows: _settings.AnalyticsEngine.MaxJoinRows,
             MaxJoinMatchesPerLeft: _settings.AnalyticsEngine.MaxJoinMatchesPerLeft);
 

@@ -37,21 +37,12 @@ public sealed class AtomicCatalogSearchToolHandler : IToolHandler
             spName = h.SpName,
             domain = h.Domain,
             entity = h.Entity,
-            tags = h.Tags,
             score = h.Score,
-            intent = new { vi = h.IntentVi, en = h.IntentEn },
-            parameters = AtomicCatalogService.ParseParamSpecs(h.ParamsJson).Select(p => new
-            {
-                name = p.Name,
-                sqlType = p.SqlType,
-                required = p.Required,
-                description_vi = p.DescriptionVi,
-                description_en = p.DescriptionEn,
-                @default = p.DefaultValue,
-                example = p.Example
-            }),
-            examples = ToBoundedJsonOrString(h.ExampleJson, maxStringLength: 2000),
-            schemaHints = ToBoundedJsonOrString(h.SchemaHintsJson, maxStringLength: 2000)
+            parameters = AtomicCatalogService.ParseParamSpecs(h.ParamsJson)
+                .Select(p => p.Name)
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray()
         });
 
         var warnings = new List<string>();

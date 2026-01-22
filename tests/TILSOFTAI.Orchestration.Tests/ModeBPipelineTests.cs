@@ -13,7 +13,7 @@ using TILSOFTAI.Orchestration.Chat.Localization;
 using TILSOFTAI.Orchestration.Contracts;
 using TILSOFTAI.Orchestration.Contracts.Validation;
 using TILSOFTAI.Orchestration.Llm.OpenAi;
-using TILSOFTAI.Orchestration.SK;
+using TILSOFTAI.Orchestration.Execution;
 using TILSOFTAI.Orchestration.Tools;
 using TILSOFTAI.Orchestration.Tools.Modularity;
 using TILSOFTAI.Orchestration.Tools.ToolSchemas;
@@ -676,7 +676,7 @@ public sealed class ModeBPipelineTests
         {
             ["atomic.catalog.search"] = new(StringComparer.OrdinalIgnoreCase) { "query", "topK" },
             ["atomic.query.execute"] = new(StringComparer.OrdinalIgnoreCase) { "spName", "params" },
-            ["analytics.run"] = new(StringComparer.OrdinalIgnoreCase) { "datasetId", "pipeline", "topN", "maxGroups", "maxResultRows" }
+            ["analytics.run"] = new(StringComparer.OrdinalIgnoreCase) { "datasetId", "pipeline", "topN", "persistResult" }
         };
 
         public IEnumerable<ToolDefinition> GetToolDefinitions()

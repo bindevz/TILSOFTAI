@@ -13,7 +13,7 @@ using TILSOFTAI.Orchestration.Contracts.Validation;
 using TILSOFTAI.Orchestration.Llm;
 using TILSOFTAI.Orchestration.Tools;
 
-namespace TILSOFTAI.Orchestration.SK;
+namespace TILSOFTAI.Orchestration.Execution;
 
 public sealed class ToolInvoker
 {
@@ -239,7 +239,10 @@ public sealed class ToolInvoker
 
     private object LogAndReturn(EnvelopeV1 envelope, long durationMs)
     {
-        var compaction = ToolResultCompactor.CompactEnvelopeWithMetadata(envelope, ResolveMaxToolResultBytes());
+        var compaction = ToolResultCompactor.CompactEnvelopeWithMetadata(
+            envelope,
+            ResolveMaxToolResultBytes(),
+            _settings.Chat.CompactionLimits);
         var datasetId = TryGetDatasetId(envelope.NormalizedIntent);
 
         _logger.LogInformation(

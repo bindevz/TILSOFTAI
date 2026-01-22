@@ -20,8 +20,6 @@ public sealed class AnalyticsToolInputSpecProvider : IToolInputSpecProvider
         spec.Args["datasetId"] = new ToolArgSpec("datasetId", ToolArgType.String, Required: true);
         spec.Args["pipeline"] = new ToolArgSpec("pipeline", ToolArgType.Json, Required: true);
         spec.Args["topN"] = new ToolArgSpec("topN", ToolArgType.Int, Required: false, Default: 20, MinInt: 1, MaxInt: 200);
-        spec.Args["maxGroups"] = new ToolArgSpec("maxGroups", ToolArgType.Int, Required: false, Default: 200, MinInt: 1, MaxInt: 5000);
-        spec.Args["maxResultRows"] = new ToolArgSpec("maxResultRows", ToolArgType.Int, Required: false, Default: 500, MinInt: 1, MaxInt: 5000);
         spec.Args["persistResult"] = new ToolArgSpec("persistResult", ToolArgType.Bool, Required: false, Default: false);
         return spec;
     }
@@ -34,16 +32,6 @@ public sealed class AnalyticsToolInputSpecProvider : IToolInputSpecProvider
 
         spec.Args["spName"] = new ToolArgSpec("spName", ToolArgType.String, Required: true);
         spec.Args["params"] = new ToolArgSpec("params", ToolArgType.Json, Required: false, Default: null);
-        spec.Args["reusePreviousFilters"] = new ToolArgSpec("reusePreviousFilters", ToolArgType.Bool, Required: false, Default: false);
-
-        spec.Args["maxRowsPerTable"] = new ToolArgSpec("maxRowsPerTable", ToolArgType.Int, Required: false, Default: 20000, MinInt: 1, MaxInt: 200000);
-        spec.Args["maxRowsSummary"] = new ToolArgSpec("maxRowsSummary", ToolArgType.Int, Required: false, Default: 500, MinInt: 0, MaxInt: 50000);
-        spec.Args["maxSchemaRows"] = new ToolArgSpec("maxSchemaRows", ToolArgType.Int, Required: false, Default: 50000, MinInt: 1, MaxInt: 500000);
-        spec.Args["maxTables"] = new ToolArgSpec("maxTables", ToolArgType.Int, Required: false, Default: 20, MinInt: 1, MaxInt: 100);
-
-        spec.Args["maxColumns"] = new ToolArgSpec("maxColumns", ToolArgType.Int, Required: false, Default: 100, MinInt: 1, MaxInt: 500);
-        spec.Args["maxDisplayRows"] = new ToolArgSpec("maxDisplayRows", ToolArgType.Int, Required: false, Default: 2000, MinInt: 1, MaxInt: 20000);
-        spec.Args["previewRows"] = new ToolArgSpec("previewRows", ToolArgType.Int, Required: false, Default: 100, MinInt: 0, MaxInt: 200);
         return spec;
     }
 

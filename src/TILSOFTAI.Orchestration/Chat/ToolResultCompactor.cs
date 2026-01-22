@@ -3,15 +3,13 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using TILSOFTAI.Orchestration.Contracts;
+using TILSOFTAI.Configuration;
 
 namespace TILSOFTAI.Orchestration.Chat;
 
 public sealed class ToolResultCompactor
 {
     private const int DefaultMaxBytes = 12000;
-    private const int MaxDepth = 6;
-    private const int MaxArrayElements = 20;
-    private const int MaxStringLength = 500;
     private const string TruncationWarning = "tool_result_truncated";
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
@@ -19,12 +17,15 @@ public sealed class ToolResultCompactor
         WriteIndented = false
     };
 
-    public static string CompactEnvelopeJson(string envelopeJson, int maxBytes = DefaultMaxBytes)
-        => CompactEnvelopeJsonWithMetadata(envelopeJson, maxBytes).Json;
+    public static string CompactEnvelopeJson(string envelopeJson, int maxBytes = DefaultMaxBytes, CompactionLimitsSettings? limits = null)
+        => CompactEnvelopeJsonWithMetadata(envelopeJson, maxBytes, limits).Json;
 
-    public static ToolCompactionResult CompactEnvelopeJsonWithMetadata(string envelopeJson, int maxBytes = DefaultMaxBytes)
+    public static ToolCompactionResult CompactEnvelopeJsonWithMetadata(string envelopeJson, int maxBytes = DefaultMaxBytes, CompactionLimitsSettings? limits = null)
     {
         maxBytes = Math.Clamp(maxBytes, 1000, 200000);
+        var maxDepth = Math.Clamp(limits?.MaxDepth ?? 6, 1, 20);
+        var maxArrayElements = Math.Clamp(limits?.MaxArrayElements ?? 20, 1, 200);
+        var maxStringLength = Math.Clamp(limits?.MaxStringLength ?? 500, 50, 5000);
 
         var droppedFields = new List<string>();
 
@@ -55,7 +56,7 @@ public sealed class ToolResultCompactor
 
         if (obj.TryGetPropertyValue("evidence", out var evidenceNode) && evidenceNode is not null)
         {
-            var pruned = PruneNode(evidenceNode, 0, ref truncated);
+            var pruned = PruneNode(evidenceNode, 0, maxDepth, maxArrayElements, maxStringLength, ref truncated);
             obj["evidence"] = pruned;
             compacted = true;
         }
@@ -100,13 +101,13 @@ public sealed class ToolResultCompactor
         return BuildMinimalEnvelopeResult(obj, note: "max_bytes", maxBytes, droppedFields);
     }
 
-    public static string CompactEnvelope(EnvelopeV1 env, int maxBytes = DefaultMaxBytes)
-        => CompactEnvelopeWithMetadata(env, maxBytes).Json;
+    public static string CompactEnvelope(EnvelopeV1 env, int maxBytes = DefaultMaxBytes, CompactionLimitsSettings? limits = null)
+        => CompactEnvelopeWithMetadata(env, maxBytes, limits).Json;
 
-    public static ToolCompactionResult CompactEnvelopeWithMetadata(EnvelopeV1 env, int maxBytes = DefaultMaxBytes)
+    public static ToolCompactionResult CompactEnvelopeWithMetadata(EnvelopeV1 env, int maxBytes = DefaultMaxBytes, CompactionLimitsSettings? limits = null)
     {
         var json = JsonSerializer.Serialize(env, Json);
-        return CompactEnvelopeJsonWithMetadata(json, maxBytes);
+        return CompactEnvelopeJsonWithMetadata(json, maxBytes, limits);
     }
 
     private static ToolCompactionResult FinalizeCompaction(
@@ -174,9 +175,9 @@ public sealed class ToolResultCompactor
         return new ToolCompactionResult(fallback, true, droppedFields, fallbackHash, GetByteCount(fallback));
     }
 
-    private static JsonNode PruneNode(JsonNode node, int depth, ref bool truncated)
+    private static JsonNode PruneNode(JsonNode node, int depth, int maxDepth, int maxArrayElements, int maxStringLength, ref bool truncated)
     {
-        if (depth >= MaxDepth)
+        if (depth >= maxDepth)
         {
             truncated = true;
             return JsonValue.Create("[truncated]")!;
@@ -186,10 +187,10 @@ public sealed class ToolResultCompactor
         {
             if (value.TryGetValue<string>(out var s))
             {
-                if (s.Length > MaxStringLength)
+                if (s.Length > maxStringLength)
                 {
                     truncated = true;
-                    s = s.Substring(0, MaxStringLength) + "...";
+                    s = s.Substring(0, maxStringLength) + "...";
                 }
                 return JsonValue.Create(s)!;
             }
@@ -200,7 +201,7 @@ public sealed class ToolResultCompactor
         if (node is JsonArray arr)
         {
             var result = new JsonArray();
-            var take = Math.Min(arr.Count, MaxArrayElements);
+            var take = Math.Min(arr.Count, maxArrayElements);
             for (var i = 0; i < take; i++)
             {
                 if (arr[i] is null)
@@ -208,9 +209,9 @@ public sealed class ToolResultCompactor
                     result.Add(null);
                     continue;
                 }
-                result.Add(PruneNode(arr[i]!, depth + 1, ref truncated));
+                result.Add(PruneNode(arr[i]!, depth + 1, maxDepth, maxArrayElements, maxStringLength, ref truncated));
             }
-            if (arr.Count > MaxArrayElements)
+            if (arr.Count > maxArrayElements)
                 truncated = true;
             return result;
         }
@@ -225,7 +226,7 @@ public sealed class ToolResultCompactor
                     result[kv.Key] = null;
                     continue;
                 }
-                result[kv.Key] = PruneNode(kv.Value, depth + 1, ref truncated);
+                result[kv.Key] = PruneNode(kv.Value, depth + 1, maxDepth, maxArrayElements, maxStringLength, ref truncated);
             }
             return result;
         }

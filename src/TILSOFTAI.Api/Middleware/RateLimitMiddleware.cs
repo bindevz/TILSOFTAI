@@ -1,26 +1,28 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
+using TILSOFTAI.Api.Localization;
+using TILSOFTAI.Configuration;
 
 namespace TILSOFTAI.Api.Middleware;
-
-public sealed class RateLimitOptions
-{
-    public int RequestsPerMinute { get; set; } = 120;
-    public int BlockDurationSeconds { get; set; } = 30;
-}
 
 public sealed class RateLimitMiddleware
 {
     private readonly RequestDelegate _next;
-    private readonly RateLimitOptions _options;
+    private readonly AppSettings _settings;
+    private readonly IApiTextLocalizer _localizer;
     private readonly ILogger<RateLimitMiddleware> _logger;
     private static readonly ConcurrentDictionary<string, RateLimitState> States = new();
 
-    public RateLimitMiddleware(RequestDelegate next, IOptions<RateLimitOptions> options, ILogger<RateLimitMiddleware> logger)
+    public RateLimitMiddleware(
+        RequestDelegate next,
+        IOptions<AppSettings> settings,
+        IApiTextLocalizer localizer,
+        ILogger<RateLimitMiddleware> logger)
     {
         _next = next;
+        _settings = settings.Value;
+        _localizer = localizer;
         _logger = logger;
-        _options = options.Value;
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -28,21 +30,22 @@ public sealed class RateLimitMiddleware
         var key = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
         var now = DateTimeOffset.UtcNow;
         var state = States.GetOrAdd(key, _ => new RateLimitState());
+        var limits = _settings.Api.RateLimit;
 
         if (state.IsBlocked(now))
         {
             context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
-            await context.Response.WriteAsync("Rate limit exceeded.");
+            await context.Response.WriteAsync(_localizer.Get(ApiTextKeys.Error_RateLimitExceeded));
             return;
         }
 
         state.Prune(now, TimeSpan.FromMinutes(1));
-        if (state.Requests.Count >= _options.RequestsPerMinute)
+        if (state.Requests.Count >= limits.RequestsPerMinute)
         {
-            state.BlockUntil = now.AddSeconds(_options.BlockDurationSeconds);
+            state.BlockUntil = now.AddSeconds(limits.BlockDurationSeconds);
             _logger.LogWarning("Rate limit triggered for {Key}", key);
             context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
-            await context.Response.WriteAsync("Rate limit exceeded.");
+            await context.Response.WriteAsync(_localizer.Get(ApiTextKeys.Error_RateLimitExceeded));
             return;
         }
 

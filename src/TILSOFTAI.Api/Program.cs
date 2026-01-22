@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 using TILSOFTAI.Api.Configuration;
 using TILSOFTAI.Api.DependencyInjection;
+using TILSOFTAI.Api.Localization;
 using TILSOFTAI.Api.Middleware;
 using TILSOFTAI.Configuration;
 using TILSOFTAI.Orchestration.Chat;
@@ -120,11 +121,12 @@ builder.Services.AddHttpClient<OpenAiChatClient>((sp, http) =>
 builder.Services.AddSingleton<OpenAiToolSchemaFactory>();
 
 // Localization
+builder.Services.AddSingleton<IApiTextLocalizer, ResxApiTextLocalizer>();
 builder.Services.AddSingleton<ILanguageResolver, HeuristicLanguageResolver>();
 builder.Services.AddSingleton<IChatTextLocalizer, ResxChatTextLocalizer>();
 // ToolInvoker infra
-builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.ExecutionContextAccessor>();
-builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.ToolInvoker>();
+builder.Services.AddScoped<TILSOFTAI.Orchestration.Execution.ExecutionContextAccessor>();
+builder.Services.AddScoped<TILSOFTAI.Orchestration.Execution.ToolInvoker>();
 
 // Chat pipeline (Mode B)
 builder.Services.AddScoped<ChatPipeline>();
@@ -159,6 +161,7 @@ if (app.Environment.IsProduction())
 }
 
 // Middleware
+app.UseMiddleware<RequestCultureMiddleware>();
 app.UseMiddleware<ExceptionHandlingMiddleware>();
 app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseMiddleware<ConversationIdMiddleware>();
