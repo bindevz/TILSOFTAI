@@ -4,6 +4,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <InvariantGlobalization>false</InvariantGlobalization>
+    <BaseOutputPath>D:\Dev Project\Source\TILSOFTAI\bin\Debug\net8.0</BaseOutputPath>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\TILSOFTAI.Orchestration\TILSOFTAI.Orchestration.csproj" />
