@@ -13,4 +13,8 @@
     <None Remove="Entities\**" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="..\TILSOFTAI.Api\Configuration\AppSettings.cs" Link="Configuration\AppSettings.cs" />
+  </ItemGroup>
+
 </Project>

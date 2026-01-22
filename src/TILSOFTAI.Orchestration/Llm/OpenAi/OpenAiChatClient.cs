@@ -3,7 +3,8 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
-using TILSOFTAI.Orchestration.Llm;
+using Microsoft.Extensions.Options;
+using TILSOFTAI.Configuration;
 
 namespace TILSOFTAI.Orchestration.Llm.OpenAi;
 
@@ -13,19 +14,19 @@ namespace TILSOFTAI.Orchestration.Llm.OpenAi;
 public sealed class OpenAiChatClient
 {
     private readonly HttpClient _http;
-    private readonly LmStudioOptions _lm;
+    private readonly LlmSettings _lm;
     private readonly ILogger<OpenAiChatClient> _logger;
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
 
-    public OpenAiChatClient(HttpClient http, LmStudioOptions lm, ILogger<OpenAiChatClient>? logger = null)
+    public OpenAiChatClient(HttpClient http, IOptions<AppSettings> settings, ILogger<OpenAiChatClient>? logger = null)
     {
         _http = http;
-        _lm = lm;
+        _lm = settings.Value.Llm;
         _logger = logger ?? NullLogger<OpenAiChatClient>.Instance;
 
         // Ensure base address is set even if DI forgets.
         if (_http.BaseAddress is null)
-            _http.BaseAddress = new Uri(_lm.BaseUrl.TrimEnd('/') + "/v1/");
+            _http.BaseAddress = new Uri(_lm.Endpoint.TrimEnd('/') + "/v1/");
 
         _http.Timeout = TimeSpan.FromSeconds(Math.Clamp(_lm.TimeoutSeconds, 5, 1800));
 
@@ -36,11 +37,7 @@ public sealed class OpenAiChatClient
 
     public string MapModel(string? requestedModel)
     {
-        var logical = string.IsNullOrWhiteSpace(requestedModel) ? _lm.Model : requestedModel;
-        if (_lm.ModelMap.TryGetValue(logical, out var mapped))
-            return mapped;
-
-        return _lm.ModelMap.TryGetValue(_lm.Model, out var fallback) ? fallback : logical;
+        return string.IsNullOrWhiteSpace(requestedModel) ? _lm.Model : requestedModel;
     }
 
     public async Task<OpenAiChatCompletionResponse> CreateChatCompletionAsync(OpenAiChatCompletionRequest request, CancellationToken ct)

@@ -20,6 +20,9 @@
   <ItemGroup>
     <Folder Include="DependencyInjection\" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="Configuration\AppSettings.cs" />
+  </ItemGroup>
 
   <!-- Ensure governance/contracts is deployed alongside the API for runtime schema validation (ver25) -->
   <ItemGroup>

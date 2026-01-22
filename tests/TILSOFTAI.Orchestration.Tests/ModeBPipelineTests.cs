@@ -1,8 +1,9 @@
-﻿using System.Net;
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using TILSOFTAI.Configuration;
 using TILSOFTAI.Application.Permissions;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Domain.ValueObjects;
@@ -11,13 +12,18 @@ using TILSOFTAI.Orchestration.Chat;
 using TILSOFTAI.Orchestration.Chat.Localization;
 using TILSOFTAI.Orchestration.Contracts;
 using TILSOFTAI.Orchestration.Contracts.Validation;
-using TILSOFTAI.Orchestration.Llm;
 using TILSOFTAI.Orchestration.Llm.OpenAi;
 using TILSOFTAI.Orchestration.SK;
 using TILSOFTAI.Orchestration.Tools;
 using TILSOFTAI.Orchestration.Tools.Modularity;
 using TILSOFTAI.Orchestration.Tools.ToolSchemas;
 using Xunit;
+using System.Globalization;
+using Microsoft.Data.Analysis;
+using TILSOFTAI.Analytics;
+using TILSOFTAI.Application.Analytics;
+using TILSOFTAI.Application.Services;
+using TILSOFTAI.Orchestration.Modules.Analytics.Handlers;
 
 namespace TILSOFTAI.Orchestration.Tests;
 
@@ -55,6 +61,70 @@ public sealed class ModeBPipelineTests
         var toolMessages = GetToolMessages(handler.RequestBodies.Skip(1));
         Assert.NotEmpty(toolMessages);
         Assert.All(toolMessages, AssertToolMessageCompacted);
+    }
+
+    [Fact]
+    public async Task ModeB_ToolMessages_DoNotIncludeEnvelopeDataRows()
+    {
+        var responses = new[]
+        {
+            ToolCallResponse(
+                ToolCall("atomic.query.execute", new { spName = "dbo.TILSOFTAI_sp_Test", @params = new { Season = "2024/2025" } })
+            ),
+            FinalResponse("final insight")
+        };
+
+        var handler = new StubOpenAiHandler(responses);
+        var toolHandlers = new IToolHandler[]
+        {
+            new TestToolHandler("atomic.catalog.search", intent => BuildCatalogResult(intent)),
+            new TestToolHandler("atomic.query.execute", intent => BuildAtomicQueryResult(intent, rowCount: 80))
+        };
+
+        var pipeline = BuildPipeline(handler, toolHandlers);
+        var response = await pipeline.HandleAsync(BuildRequest("show me data"), BuildContext(), CancellationToken.None);
+
+        AssertHasThreeBlocks(response.Choices.First().Message.Content);
+
+        var toolMessages = GetToolMessages(handler.RequestBodies.Skip(1));
+        Assert.NotEmpty(toolMessages);
+        foreach (var msg in toolMessages)
+        {
+            using var doc = JsonDocument.Parse(msg.Content ?? "{}");
+            Assert.False(doc.RootElement.TryGetProperty("data", out _));
+        }
+    }
+
+    [Fact]
+    public async Task ModeB_Headings_Localize_English_And_Vietnamese()
+    {
+        var originalCulture = CultureInfo.CurrentCulture;
+        var originalUiCulture = CultureInfo.CurrentUICulture;
+
+        try
+        {
+            var responses = new[] { FinalResponse("insight") };
+            var handler = new StubOpenAiHandler(responses);
+            var pipeline = BuildPipeline(handler, Array.Empty<IToolHandler>());
+
+            var enResponse = await pipeline.HandleAsync(BuildRequest("show me data"), BuildContext(), CancellationToken.None);
+            var enContent = enResponse.Choices.First().Message.Content ?? string.Empty;
+            var enTitle = GetLocalizedText(ChatTextKeys.BlockTitleInsight, "en-US");
+            Assert.Contains($"## {enTitle}", enContent);
+
+            var viHandler = new StubOpenAiHandler(new[] { FinalResponse("insight") });
+            var viPipeline = BuildPipeline(viHandler, Array.Empty<IToolHandler>());
+            var viResponse = await viPipeline.HandleAsync(BuildRequest("danh sach"), BuildContext(), CancellationToken.None);
+            var viContent = viResponse.Choices.First().Message.Content ?? string.Empty;
+            var viTitle = GetLocalizedText(ChatTextKeys.BlockTitleInsight, "vi-VN");
+            Assert.Contains($"## {viTitle}", viContent);
+            Assert.DoesNotContain($"## {enTitle}", viContent);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = originalCulture;
+            CultureInfo.CurrentUICulture = originalUiCulture;
+        }
     }
 
     [Fact]
@@ -124,8 +194,8 @@ public sealed class ModeBPipelineTests
             new TestToolHandler("analytics.run", intent => BuildAnalyticsRunResult(intent, rowCount: 10))
         };
 
-        var tuning = new ChatTuningOptions { MaxToolResultBytes = 2000 };
-        var pipeline = BuildPipeline(handler, toolHandlers, tuning);
+        var maxBytes = 2000;
+        var pipeline = BuildPipeline(handler, toolHandlers, maxBytes);
         var response = await pipeline.HandleAsync(BuildRequest("big output"), BuildContext(), CancellationToken.None);
 
         AssertHasThreeBlocks(response.Choices.First().Message.Content);
@@ -135,7 +205,7 @@ public sealed class ModeBPipelineTests
         foreach (var msg in toolMessages)
         {
             AssertToolMessageCompacted(msg);
-            Assert.True(Encoding.UTF8.GetByteCount(msg.Content ?? string.Empty) <= tuning.MaxToolResultBytes);
+            Assert.True(Encoding.UTF8.GetByteCount(msg.Content ?? string.Empty) <= maxBytes);
             using var doc = JsonDocument.Parse(msg.Content ?? "{}");
             var root = doc.RootElement;
             if (root.TryGetProperty("compaction", out var compaction)
@@ -144,6 +214,91 @@ public sealed class ModeBPipelineTests
                 Assert.True(truncatedEl.ValueKind == JsonValueKind.True || truncatedEl.ValueKind == JsonValueKind.False);
             }
         }
+    }
+
+    [Theory]
+    [InlineData("Season")]
+    [InlineData("@Season")]
+    public async Task AtomicQueryExecute_NormalizesParamKeys(string paramKey)
+    {
+        var entry = new AtomicCatalogEntry(
+            SpName: "dbo.TILSOFTAI_sp_Test",
+            IsEnabled: true,
+            IsReadOnly: true,
+            IsAtomicCompatible: true,
+            Domain: null,
+            Entity: null,
+            IntentVi: "test",
+            IntentEn: "test",
+            Tags: null,
+            ParamsJson: "[{\"name\":\"@Season\"}]",
+            ExampleJson: null,
+            SchemaHintsJson: null,
+            UpdatedAtUtc: DateTimeOffset.UtcNow);
+
+        var catalogRepo = new FakeAtomicCatalogRepository(entry);
+        var queryRepo = new FakeAtomicQueryRepository();
+        var catalogService = new AtomicCatalogService(catalogRepo);
+        var queryService = new AtomicQueryService(queryRepo);
+
+        var settings = BuildSettings(null);
+        var options = Options.Create(settings);
+        var analyticsService = new AnalyticsService(
+            Array.Empty<IAnalyticsDataSource>(),
+            new InMemoryDatasetStore(),
+            new NullAuditLogger(),
+            null,
+            options);
+
+        var handler = new AtomicQueryExecuteToolHandler(
+            queryService,
+            analyticsService,
+            catalogService,
+            new ExecutionContextAccessor(),
+            new ResxChatTextLocalizer(),
+            options,
+            NullLogger<AtomicQueryExecuteToolHandler>.Instance);
+
+        var json = $"{{\"{paramKey}\":\"2024/2025\"}}";
+        var doc = JsonDocument.Parse(json);
+        try
+        {
+            var intent = new DynamicToolIntent(
+                Filters: new Dictionary<string, string?>(),
+                Page: 1,
+                PageSize: 20,
+                Args: new Dictionary<string, object?>
+                {
+                    ["spName"] = "dbo.TILSOFTAI_sp_Test",
+                    ["params"] = doc.RootElement
+                });
+
+            var result = await handler.HandleAsync(intent, BuildContext(), CancellationToken.None);
+            Assert.True(result.Result.Success);
+            Assert.NotNull(queryRepo.LastParameters);
+            Assert.Contains("@Season", queryRepo.LastParameters!.Keys, StringComparer.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            doc.Dispose();
+        }
+    }
+
+    [Fact]
+    public void AtomicDataEngine_Join_IsCaseSensitive_ByDefault()
+    {
+        var left = new DataFrame(new StringDataFrameColumn("key", new[] { "ABC" }));
+        var right = new DataFrame(
+            new StringDataFrameColumn("key", new[] { "abc" }),
+            new Int32DataFrameColumn("value", new[] { 1 }));
+
+        var engine = new AtomicDataEngine();
+        var json = "{\"steps\":[{\"op\":\"join\",\"rightDatasetId\":\"right\",\"leftKeys\":[\"key\"],\"rightKeys\":[\"key\"],\"how\":\"inner\",\"rightPrefix\":\"r_\",\"selectRight\":[\"value\"]}]}";
+        using var doc = JsonDocument.Parse(json);
+        var bounds = new AtomicDataEngine.EngineBounds(20, 200, 1000, 50, 50, 1000);
+
+        var result = engine.Execute(left, doc.RootElement, bounds, id => string.Equals(id, "right", StringComparison.Ordinal) ? right : null);
+        Assert.Equal(0L, result.Data.Rows.Count);
     }
 
     private static ChatCompletionRequest BuildRequest(string content)
@@ -167,25 +322,17 @@ public sealed class ModeBPipelineTests
             ConversationId = "conv-1"
         };
 
-    private static ChatPipeline BuildPipeline(StubOpenAiHandler handler, IEnumerable<IToolHandler> toolHandlers, ChatTuningOptions? tuning = null)
+    private static ChatPipeline BuildPipeline(StubOpenAiHandler handler, IEnumerable<IToolHandler> toolHandlers, int? maxToolResultBytes = null)
     {
         var httpClient = new HttpClient(handler)
         {
             BaseAddress = new Uri("http://localhost/")
         };
 
-        var lmOptions = new LmStudioOptions
-        {
-            BaseUrl = "http://localhost",
-            Model = "test",
-            TimeoutSeconds = 30,
-            ModelMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-            {
-                ["test"] = "test"
-            }
-        };
+        var settings = BuildSettings(maxToolResultBytes);
+        var options = Options.Create(settings);
 
-        var chatClient = new OpenAiChatClient(httpClient, lmOptions, NullLogger<OpenAiChatClient>.Instance);
+        var chatClient = new OpenAiChatClient(httpClient, options, NullLogger<OpenAiChatClient>.Instance);
 
         var provider = new TestToolRegistrationProvider();
         var registry = new ToolRegistry(new[] { provider });
@@ -195,38 +342,87 @@ public sealed class ModeBPipelineTests
         var dispatcher = new ToolDispatcher(toolHandlers);
         var rbac = new RbacService();
         var ctxAccessor = new ExecutionContextAccessor();
-        var validationOptions = Options.Create(new ResponseSchemaValidationOptions { Enabled = false });
-        var validator = new ResponseSchemaValidator(validationOptions, NullLogger<ResponseSchemaValidator>.Instance);
+        var validator = new ResponseSchemaValidator(options, NullLogger<ResponseSchemaValidator>.Instance);
 
+        var localizer = new ResxChatTextLocalizer();
         var toolInvoker = new ToolInvoker(
             registry,
             dispatcher,
             rbac,
             ctxAccessor,
             validator,
+            localizer,
+            options,
             NullLogger<ToolInvoker>.Instance);
 
         var auditLogger = new NullAuditLogger();
-        var languageResolver = new HeuristicLanguageResolver();
-        var localizer = new DefaultChatTextLocalizer();
-        var patterns = new ChatTextPatterns();
-        var tokenBudget = new TokenBudget();
-        var chatTuning = tuning ?? new ChatTuningOptions();
+        var languageResolver = new HeuristicLanguageResolver(options);
 
         return new ChatPipeline(
             chatClient,
             schemaFactory,
             toolInvoker,
             ctxAccessor,
-            tokenBudget,
             auditLogger,
             languageResolver,
             localizer,
-            patterns,
-            chatTuning,
+            options,
             NullLogger<ChatPipeline>.Instance);
     }
 
+    private static AppSettings BuildSettings(int? maxToolResultBytes)
+    {
+        return new AppSettings
+        {
+            Llm = new LlmSettings
+            {
+                Endpoint = "http://localhost",
+                Model = "test",
+                TimeoutSeconds = 30
+            },
+            Chat = new ChatSettings
+            {
+                MaxToolSteps = 8,
+                MaxPromptTokensEstimate = 8000,
+                MaxToolResultBytes = maxToolResultBytes ?? 16000,
+                TrimPolicy = "drop_tools_first"
+            },
+            Sql = new SqlSettings
+            {
+                ConnectionStringName = "SqlServer",
+                CommandTimeoutSeconds = 60
+            },
+            Redis = new RedisSettings
+            {
+                Enabled = false,
+                ConnectionString = null,
+                DatasetTtlMinutes = 10
+            },
+            Orchestration = new OrchestrationSettings
+            {
+                ToolAllowlist = new[] { "atomic.catalog.search", "atomic.query.execute", "analytics.run" },
+                StrictMode = new StrictModeSettings
+                {
+                    ResponseSchemaValidationEnabled = false,
+                    ValidateAllKindsWithSchema = false,
+                    FailOnMissingSchemaForEnforcedKinds = true
+                }
+            },
+            AnalyticsEngine = new AnalyticsEngineSettings
+            {
+                MaxJoinRows = 100000,
+                MaxJoinMatchesPerLeft = 50,
+                MaxGroups = 200,
+                PreviewRowLimit = 20,
+                JoinKeyOptions = new JoinKeyOptions()
+            },
+            Localization = new LocalizationSettings
+            {
+                DefaultCulture = "en",
+                SupportedCultures = new[] { "en", "vi" }
+            }
+        };
+    }
     private static IReadOnlyList<OpenAiChatMessage> GetToolMessages(IEnumerable<string> requestBodies)
     {
         var list = new List<OpenAiChatMessage>();
@@ -275,6 +471,23 @@ public sealed class ModeBPipelineTests
                 if (payload.TryGetProperty("rows", out var rows) && rows.ValueKind == JsonValueKind.Array)
                     Assert.True(rows.GetArrayLength() <= 20);
             }
+        }
+    }
+
+    private static string GetLocalizedText(string key, string cultureName)
+    {
+        var originalCulture = CultureInfo.CurrentCulture;
+        var originalUiCulture = CultureInfo.CurrentUICulture;
+        try
+        {
+            var localizer = new ResxChatTextLocalizer();
+            localizer.SetCulture(cultureName);
+            return localizer.Get(key);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = originalCulture;
+            CultureInfo.CurrentUICulture = originalUiCulture;
         }
     }
 
@@ -518,4 +731,53 @@ public sealed class ModeBPipelineTests
         public Task LogAiDecisionAsync(TSExecutionContext context, string aiOutput, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task LogToolExecutionAsync(TSExecutionContext context, string toolName, object arguments, object result, CancellationToken cancellationToken) => Task.CompletedTask;
     }
+
+    private sealed class FakeAtomicCatalogRepository : IAtomicCatalogRepository
+    {
+        private readonly AtomicCatalogEntry _entry;
+
+        public FakeAtomicCatalogRepository(AtomicCatalogEntry entry)
+        {
+            _entry = entry;
+        }
+
+        public Task<IReadOnlyList<AtomicCatalogSearchHit>> SearchAsync(string query, int topK, CancellationToken cancellationToken)
+            => Task.FromResult<IReadOnlyList<AtomicCatalogSearchHit>>(Array.Empty<AtomicCatalogSearchHit>());
+
+        public Task<AtomicCatalogEntry?> GetByNameAsync(string storedProcedure, CancellationToken cancellationToken)
+            => Task.FromResult<AtomicCatalogEntry?>(_entry);
+    }
+
+    private sealed class FakeAtomicQueryRepository : IAtomicQueryRepository
+    {
+        public IReadOnlyDictionary<string, object?>? LastParameters { get; private set; }
+
+        public Task<AtomicQueryResult> ExecuteAsync(string storedProcedure, IReadOnlyDictionary<string, object?> parameters, AtomicQueryReadOptions readOptions, CancellationToken cancellationToken)
+        {
+            LastParameters = parameters;
+            var schema = new AtomicQuerySchema(Array.Empty<AtomicResultSetSchema>());
+            var result = new AtomicQueryResult(schema, null, Array.Empty<AtomicResultSet>());
+            return Task.FromResult(result);
+        }
+    }
+
+    private sealed class InMemoryDatasetStore : IAnalyticsDatasetStore
+    {
+        private readonly Dictionary<string, object> _store = new(StringComparer.OrdinalIgnoreCase);
+
+        public Task StoreAsync(string datasetId, object dataset, TimeSpan ttl, CancellationToken cancellationToken)
+        {
+            _store[datasetId] = dataset;
+            return Task.CompletedTask;
+        }
+
+        public bool TryGet(string datasetId, out object dataset)
+            => _store.TryGetValue(datasetId, out dataset!);
+
+        public void Remove(string datasetId)
+            => _store.Remove(datasetId);
+    }
 }
+
+
+

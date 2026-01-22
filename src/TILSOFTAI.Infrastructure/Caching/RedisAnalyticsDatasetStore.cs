@@ -1,6 +1,7 @@
 ﻿using System.Text.Json;
 using StackExchange.Redis;
 using TILSOFTAI.Application.Analytics;
+using TILSOFTAI.Configuration;
 using TILSOFTAI.Domain.Interfaces;
 
 namespace TILSOFTAI.Infrastructure.Caching;
@@ -13,14 +14,14 @@ public sealed class RedisAnalyticsDatasetStore : IAnalyticsDatasetStore
     private const string IndexPrefix = "dataset:index:";
     private readonly IDatabase? _db;
     private readonly InMemoryAnalyticsDatasetStore _fallback;
-    private readonly AnalyticsDatasetStoreOptions _options;
+    private readonly RedisSettings _settings;
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
 
-    public RedisAnalyticsDatasetStore(IConnectionMultiplexer? mux, InMemoryAnalyticsDatasetStore fallback, AnalyticsDatasetStoreOptions options)
+    public RedisAnalyticsDatasetStore(IConnectionMultiplexer? mux, InMemoryAnalyticsDatasetStore fallback, RedisSettings settings)
     {
         _db = mux?.GetDatabase();
         _fallback = fallback;
-        _options = options ?? new AnalyticsDatasetStoreOptions();
+        _settings = settings ?? new RedisSettings();
     }
 
     public async Task StoreAsync(string datasetId, object dataset, TimeSpan ttl, CancellationToken cancellationToken)
@@ -121,8 +122,8 @@ public sealed class RedisAnalyticsDatasetStore : IAnalyticsDatasetStore
 
     private TimeSpan ResolveTtl(TimeSpan ttl)
     {
-        if (_options.TtlMinutes > 0)
-            return TimeSpan.FromMinutes(_options.TtlMinutes);
+        if (_settings.DatasetTtlMinutes > 0)
+            return TimeSpan.FromMinutes(_settings.DatasetTtlMinutes);
 
         return ttl <= TimeSpan.Zero ? TimeSpan.FromMinutes(10) : ttl;
     }

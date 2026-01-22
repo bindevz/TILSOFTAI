@@ -1,4 +1,4 @@
-
+﻿
 namespace TILSOFTAI.Orchestration.Tools;
 
 /// <summary>
@@ -17,4 +17,3 @@ public sealed record DynamicToolIntent(
 // Write tools are still governed by:
 // - RBAC (application layer)
 // - 2-step confirmation plans (prepare -> commit)
-// - CommitGuardFilter (requires explicit user confirmation)

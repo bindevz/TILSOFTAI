@@ -1,8 +1,11 @@
-﻿using System.Security.Cryptography;
+﻿using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using TILSOFTAI.Configuration;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Orchestration.Chat.Localization;
 using TILSOFTAI.Orchestration.Llm;
@@ -26,46 +29,39 @@ public sealed class ChatPipeline
     {
         "system", "user", "assistant", "tool"
     };
+    private const double DefaultTemperature = 0.2;
+    private const int DefaultMaxTokens = 800;
 
     private readonly OpenAiChatClient _chat;
     private readonly OpenAiToolSchemaFactory _toolSchemaFactory;
     private readonly ToolInvoker _toolInvoker;
     private readonly ExecutionContextAccessor _ctxAccessor;
-    private readonly TokenBudget _tokenBudget;
     private readonly IAuditLogger _auditLogger;
     private readonly ILanguageResolver _languageResolver;
     private readonly IChatTextLocalizer _localizer;
-    private readonly ChatTextPatterns _patterns;
-    private readonly ChatTuningOptions _tuning;
+    private readonly AppSettings _settings;
     private readonly ILogger<ChatPipeline> _logger;
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
-
-    // Tool allowlist exposed to LLM for this Orchestrator (single source of truth).
-    private static readonly IReadOnlySet<string> ExposedTools = ToolExposurePolicy.AllowedTools;
 
     public ChatPipeline(
         OpenAiChatClient chat,
         OpenAiToolSchemaFactory toolSchemaFactory,
         ToolInvoker toolInvoker,
         ExecutionContextAccessor ctxAccessor,
-        TokenBudget tokenBudget,
         IAuditLogger auditLogger,
         ILanguageResolver languageResolver,
         IChatTextLocalizer localizer,
-        ChatTextPatterns patterns,
-        ChatTuningOptions tuning,
+        IOptions<AppSettings> settings,
         ILogger<ChatPipeline>? logger = null)
     {
         _chat = chat;
         _toolSchemaFactory = toolSchemaFactory;
         _toolInvoker = toolInvoker;
         _ctxAccessor = ctxAccessor;
-        _tokenBudget = tokenBudget;
         _auditLogger = auditLogger;
         _languageResolver = languageResolver;
         _localizer = localizer;
-        _patterns = patterns;
-        _tuning = tuning;
+        _settings = settings.Value;
         _logger = logger ?? NullLogger<ChatPipeline>.Instance;
     }
 
@@ -73,12 +69,15 @@ public sealed class ChatPipeline
     {
         var incomingMessages = request.Messages ?? Array.Empty<ChatCompletionMessage>();
 
+        var cultureName = _languageResolver.Resolve(incomingMessages);
+        ApplyCulture(cultureName);
+
         if (incomingMessages.Any(m => !SupportedRoles.Contains(m.Role)))
-            return BuildFailureResponse("Unsupported message role.", request.Model, incomingMessages);
+            return BuildFailureResponse(BuildFallbackInsight(), request.Model, incomingMessages);
 
         var hasUser = incomingMessages.Any(m => string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(m.Content));
         if (!hasUser)
-            return BuildFailureResponse("User message required.", request.Model, incomingMessages);
+            return BuildFailureResponse(BuildFallbackInsight(), request.Model, incomingMessages);
 
         var lastUserMessage = incomingMessages.Last(m => string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(m.Content)).Content;
 
@@ -90,36 +89,16 @@ public sealed class ChatPipeline
         catch { /* ignore */ }
 
 
-        // Resolve response language.
-        var lang = _languageResolver.Resolve(incomingMessages);
-
         // Set request context for ToolInvoker
         _ctxAccessor.Context = context;
-        _ctxAccessor.ResponseLanguage = lang;
-        _ctxAccessor.ConfirmedConfirmationId = _patterns.TryExtractConfirmationId(lastUserMessage);
-        _ctxAccessor.AutoInvokeCount = 0;
-        _ctxAccessor.CircuitBreakerTripped = false;
-        _ctxAccessor.CircuitBreakerReason = null;
-        _ctxAccessor.AutoInvokeSignatureCounts.Clear();
-        _ctxAccessor.LastTotalCount = null;
-        _ctxAccessor.LastStoredProcedure = null;
-        _ctxAccessor.LastFilters = null;
-        _ctxAccessor.LastSeasonFilter = null;
-        _ctxAccessor.LastCollectionFilter = null;
-        _ctxAccessor.LastRangeNameFilter = null;
-        _ctxAccessor.LastDisplayPreviewJson = null;
         _ctxAccessor.LastListPreviewMarkdown = null;
         _ctxAccessor.LastInsightPreviewMarkdown = null;
-        _ctxAccessor.LastSchemaDigestJson = null;
-        _ctxAccessor.LastEngineDatasetsDigestJson = null;
-        _ctxAccessor.LastListPreviewTitle = null;
-        _ctxAccessor.LastInsightPreviewTitle = null;
 
         _logger.LogInformation("ChatPipeline start requestId={RequestId} traceId={TraceId} convId={ConversationId} userId={UserId} lang={Lang} model={Model} msgs={MsgCount}",
-            context.RequestId, context.TraceId, context.ConversationId, context.UserId, lang.ToIsoCode(), request.Model, incomingMessages.Count);
+            context.RequestId, context.TraceId, context.ConversationId, context.UserId, cultureName, request.Model, incomingMessages.Count);
 
         // Build OpenAI messages
-        var systemPrompt = BuildSystemPrompt(lang);
+        var systemPrompt = BuildSystemPrompt();
         var messages = new List<OpenAiChatMessage>
         {
             new() { Role = "system", Content = systemPrompt }
@@ -135,17 +114,20 @@ public sealed class ChatPipeline
         }
 
         // Build tools
-        var tools = _toolSchemaFactory.BuildTools(ExposedTools);
+        var toolAllowlist = ResolveToolAllowlist();
+        var tools = _toolSchemaFactory.BuildTools(toolAllowlist);
 
         // Planner loop
         var mappedModel = _chat.MapModel(request.Model);
-        var maxSteps = Math.Clamp(_tuning.MaxToolSteps, 1, 20);
+        var maxSteps = Math.Clamp(_settings.Chat.MaxToolSteps, 1, 20);
+        var previewRowLimit = ResolvePreviewRowLimit();
+        var signatureCounts = new Dictionary<string, int>(StringComparer.Ordinal);
 
         OpenAiChatCompletionResponse? lastResp = null;
 
         for (var step = 0; step < maxSteps; step++)
         {
-            TrimMessagesToBudget(messages, _tuning.MaxPromptTokens);
+            TrimMessagesToBudget(messages);
 
             var call = new OpenAiChatCompletionRequest
             {
@@ -153,8 +135,8 @@ public sealed class ChatPipeline
                 Messages = messages,
                 Tools = tools.ToList(),
                 ToolChoice = "auto",
-                Temperature = request.Temperature ?? _tuning.Temperature,
-                MaxTokens = request.MaxTokens ?? _tuning.MaxTokens,
+                Temperature = request.Temperature ?? DefaultTemperature,
+                MaxTokens = request.MaxTokens ?? DefaultMaxTokens,
                 Stream = false
             };
 
@@ -164,22 +146,14 @@ public sealed class ChatPipeline
             }
             catch (TaskCanceledException)
             {
-                var timeoutInsight = lang == ChatLanguage.En
-                    ? "The request timed out (504)."
-                    : "Yêu cầu bị quá thời gian xử lý (504).";
-
-                var timeoutFinal = ComposeFinalMarkdown(timeoutInsight, _ctxAccessor, lang);
+                var timeoutFinal = ComposeFinalMarkdown(BuildFallbackInsight(), _ctxAccessor);
                 return MapToApiResponse(lastResp, request.Model ?? "TILSOFT-AI", timeoutFinal, incomingMessages);
-            }
-            catch (TimeoutException)
+            }catch (TimeoutException)
             {
-                var timeoutInsight = lang == ChatLanguage.En
-                    ? "The request timed out (504)."
-                    : "Yêu cầu bị quá thời gian xử lý (504).";
-
-                var timeoutFinal = ComposeFinalMarkdown(timeoutInsight, _ctxAccessor, lang);
+                var timeoutFinal = ComposeFinalMarkdown(BuildFallbackInsight(), _ctxAccessor);
                 return MapToApiResponse(lastResp, request.Model ?? "TILSOFT-AI", timeoutFinal, incomingMessages);
             }
+
 
             var choice = lastResp.Choices.FirstOrDefault();
             if (choice?.Message is null)
@@ -193,9 +167,9 @@ public sealed class ChatPipeline
             {
                 var insight = SanitizeInsightText(assistantMsg.Content);
                 if (string.IsNullOrWhiteSpace(insight))
-                    insight = _localizer.Get(ChatTextKeys.FallbackNoContent, lang);
+                    insight = BuildFallbackInsight();
 
-                var final = ComposeFinalMarkdown(insight, _ctxAccessor, lang);
+                var final = ComposeFinalMarkdown(insight, _ctxAccessor);
 
                 // Audit: AI output (best-effort)
                 try
@@ -215,15 +189,13 @@ public sealed class ChatPipeline
 
                 // Circuit breaker by signature
                 var signature = ComputeSignature(toolName, argsJson);
-                _ctxAccessor.AutoInvokeSignatureCounts.TryGetValue(signature, out var count);
+                if (!signatureCounts.TryGetValue(signature, out var count))
+                    count = 0;
                 count++;
-                _ctxAccessor.AutoInvokeSignatureCounts[signature] = count;
+                signatureCounts[signature] = count;
                 if (count > 2)
                 {
-                    _ctxAccessor.CircuitBreakerTripped = true;
-                    _ctxAccessor.CircuitBreakerReason = $"Repeated tool call signature: {toolName}";
-
-                    var forced = ComposeFinalMarkdown(_localizer.Get(ChatTextKeys.FallbackNoContent, lang), _ctxAccessor, lang);
+                    var forced = ComposeFinalMarkdown(BuildFallbackInsight(), _ctxAccessor);
                     return MapToApiResponse(lastResp, request.Model ?? "TILSOFT-AI", forced, incomingMessages);
                 }
 
@@ -239,10 +211,10 @@ public sealed class ChatPipeline
                     argsElement = doc.RootElement.Clone();
                 }
 
-                var toolResult = await _toolInvoker.ExecuteAsync(toolName, argsElement, ExposedTools, cancellationToken);
+                var toolResult = await _toolInvoker.ExecuteAsync(toolName, argsElement, toolAllowlist, cancellationToken);
                 var toolResultJson = JsonSerializer.Serialize(toolResult, _json);
 
-                TryCaptureToolArtifacts(toolResultJson);
+                TryCaptureToolArtifacts(toolResultJson, previewRowLimit);
 
                 var compactJson = ToolResultCompactor.CompactEnvelopeJson(toolResultJson, ResolveMaxToolResultBytes());
                 messages.Add(new OpenAiChatMessage
@@ -252,50 +224,82 @@ public sealed class ChatPipeline
                     Content = compactJson
                 });
 
-                TrimMessagesToBudget(messages, _tuning.MaxPromptTokens);
+                TrimMessagesToBudget(messages);
             }
         }
 
-        var fallbackFinal = ComposeFinalMarkdown(_localizer.Get(ChatTextKeys.FallbackNoContent, lang), _ctxAccessor, lang);
+        var fallbackFinal = ComposeFinalMarkdown(BuildFallbackInsight(), _ctxAccessor);
         return MapToApiResponse(lastResp, request.Model ?? "TILSOFT-AI", fallbackFinal, incomingMessages);
     }
-    private string BuildSystemPrompt(ChatLanguage lang)
+    private void ApplyCulture(string cultureName)
     {
-        var basePrompt = _localizer.Get(ChatTextKeys.SystemPrompt, lang);
+        if (string.IsNullOrWhiteSpace(cultureName))
+            return;
 
-        var outputRule = lang == ChatLanguage.En
-            ? "OUTPUT: Return only plain insight text. Do NOT include Markdown headings, tables, lists, or JSON."
-            : "OUTPUT: Chi tra loi phan insight ngan gon. KHONG dung tieu de Markdown, bang, danh sach hoac JSON.";
-
-        var toolRule = lang == ChatLanguage.En
-            ? "Tool rule: If you need to choose a stored procedure by domain/context, call atomic.catalog.search first, then atomic.query.execute. If you need deeper analysis (group/pivot/sum/avg/topN), use analytics.run with datasetId from atomic.query.execute."
-            : "Tool rule: Neu can chon stored procedure theo domain/ngu canh, luon goi atomic.catalog.search truoc, sau do atomic.query.execute. Neu can phan tich sau (group/pivot/sum/avg/topN), dung analytics.run voi datasetId tu atomic.query.execute.";
-
-        basePrompt += "\n\n" + outputRule;
-        basePrompt += "\n\n" + toolRule;
-
-        return basePrompt;
+        try
+        {
+            var culture = CultureInfo.GetCultureInfo(cultureName);
+            CultureInfo.CurrentCulture = culture;
+            CultureInfo.CurrentUICulture = culture;
+            _localizer.SetCulture(cultureName);
+        }
+        catch (CultureNotFoundException)
+        {
+            // Ignore invalid culture names.
+        }
     }
-    private static void TrimMessagesToBudget(List<OpenAiChatMessage> messages, int maxPromptTokens)
+
+    private string BuildFallbackInsight()
+    {
+        var fallback = _localizer.Get(ChatTextKeys.FallbackNoContent);
+        var hint = _localizer.Get(ChatTextKeys.PreviousQueryHint);
+        if (string.IsNullOrWhiteSpace(hint))
+            return fallback;
+        return string.Join("\n\n", new[] { fallback, hint }.Where(s => !string.IsNullOrWhiteSpace(s)));
+    }
+
+    private IReadOnlySet<string> ResolveToolAllowlist()
+    {
+        var allowlist = _settings.Orchestration.ToolAllowlist ?? Array.Empty<string>();
+        var trimmed = allowlist
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => x.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (trimmed.Length == 0)
+        {
+            trimmed =
+            [
+                "atomic.catalog.search",
+                "atomic.query.execute",
+                "analytics.run"
+            ];
+        }
+
+        return new HashSet<string>(trimmed, StringComparer.OrdinalIgnoreCase);
+    }
+    private string BuildSystemPrompt()
+    {
+        return _localizer.Get(ChatTextKeys.SystemPrompt);
+    }
+    private void TrimMessagesToBudget(List<OpenAiChatMessage> messages)
     {
         if (messages.Count == 0)
             return;
 
-        var limit = Math.Max(maxPromptTokens, 1000);
+        var limit = Math.Clamp(_settings.Chat.MaxPromptTokensEstimate, 256, 200000);
+        var policy = (_settings.Chat.TrimPolicy ?? string.Empty).Trim().ToLowerInvariant();
         while (EstimatePromptTokens(messages) > limit && messages.Count > 1)
         {
-            var toolIndex = messages.FindIndex(m => string.Equals(m.Role, "tool", StringComparison.OrdinalIgnoreCase));
-            if (toolIndex > 0)
+            if (policy != "drop_oldest_first")
             {
-                messages.RemoveAt(toolIndex);
-                continue;
-            }
-
-            var keepFrom = Math.Max(1, messages.Count - 8);
-            if (messages.Count > keepFrom)
-            {
-                messages.RemoveAt(1);
-                continue;
+                var toolIndex = messages.FindIndex(m => string.Equals(m.Role, "tool", StringComparison.OrdinalIgnoreCase));
+                if (toolIndex > 0)
+                {
+                    messages.RemoveAt(toolIndex);
+                    continue;
+                }
             }
 
             if (messages.Count > 1)
@@ -315,34 +319,31 @@ public sealed class ChatPipeline
         }
         return total;
     }
-    private string ComposeFinalMarkdown(string insightText, ExecutionContextAccessor ctx, ChatLanguage lang)
+    private string ComposeFinalMarkdown(string insightText, ExecutionContextAccessor ctx)
     {
-        var emptyNote = lang == ChatLanguage.En ? "(none)" : "(không có)";
-        var insight = string.IsNullOrWhiteSpace(insightText) ? emptyNote : insightText.Trim();
-        var insightPreview = string.IsNullOrWhiteSpace(ctx.LastInsightPreviewMarkdown) ? emptyNote : ctx.LastInsightPreviewMarkdown;
-        var listPreview = string.IsNullOrWhiteSpace(ctx.LastListPreviewMarkdown) ? emptyNote : ctx.LastListPreviewMarkdown;
+        var insight = string.IsNullOrWhiteSpace(insightText) ? string.Empty : insightText.Trim();
+        var insightPreview = string.IsNullOrWhiteSpace(ctx.LastInsightPreviewMarkdown) ? string.Empty : ctx.LastInsightPreviewMarkdown;
+        var listPreview = string.IsNullOrWhiteSpace(ctx.LastListPreviewMarkdown) ? string.Empty : ctx.LastListPreviewMarkdown;
 
-        var insightTitle = _localizer.Get(ChatTextKeys.InsightBlockTitle, lang);
-        var insightPreviewTitle = _localizer.Get(ChatTextKeys.InsightPreviewTitle, lang);
-        var listPreviewTitle = _localizer.Get(ChatTextKeys.ListPreviewTitle, lang);
+        var insightTitle = _localizer.Get(ChatTextKeys.BlockTitleInsight);
+        var insightPreviewTitle = _localizer.Get(ChatTextKeys.BlockTitleInsightPreview);
+        var listPreviewTitle = _localizer.Get(ChatTextKeys.BlockTitleListPreview);
 
         var sb = new StringBuilder();
         sb.AppendLine($"## {insightTitle}");
-        sb.AppendLine(insight);
+        if (!string.IsNullOrWhiteSpace(insight))
+            sb.AppendLine(insight);
         sb.AppendLine();
         sb.AppendLine($"## {insightPreviewTitle}");
-        if (!string.IsNullOrWhiteSpace(ctx.LastInsightPreviewTitle))
-            sb.AppendLine($"_{ctx.LastInsightPreviewTitle}_");
-        sb.AppendLine(insightPreview);
+        if (!string.IsNullOrWhiteSpace(insightPreview))
+            sb.AppendLine(insightPreview);
         sb.AppendLine();
         sb.AppendLine($"## {listPreviewTitle}");
-        if (!string.IsNullOrWhiteSpace(ctx.LastListPreviewTitle))
-            sb.AppendLine($"_{ctx.LastListPreviewTitle}_");
-        sb.AppendLine(listPreview);
+        if (!string.IsNullOrWhiteSpace(listPreview))
+            sb.AppendLine(listPreview);
         return sb.ToString().TrimEnd();
     }
-
-    private static string SanitizeInsightText(string? text)
+private static string SanitizeInsightText(string? text)
     {
         if (string.IsNullOrWhiteSpace(text))
             return string.Empty;
@@ -383,13 +384,14 @@ public sealed class ChatPipeline
         return trimmed.Contains("|", StringComparison.Ordinal) && trimmed.Contains("---", StringComparison.Ordinal);
     }
 
-    private void TryCaptureToolArtifacts(string envelopeJson)
+    private void TryCaptureToolArtifacts(string envelopeJson, int previewRowLimit)
     {
         if (string.IsNullOrWhiteSpace(envelopeJson))
             return;
 
         try
         {
+            var renderOptions = new MarkdownTableRenderOptions { MaxRows = previewRowLimit };
             using var doc = JsonDocument.Parse(envelopeJson);
             var root = doc.RootElement;
             if (!root.TryGetProperty("tool", out var toolEl) || !toolEl.TryGetProperty("name", out var nameEl))
@@ -400,20 +402,17 @@ public sealed class ChatPipeline
             if (string.Equals(toolName, "analytics.run", StringComparison.OrdinalIgnoreCase)
                 && string.IsNullOrWhiteSpace(_ctxAccessor.LastInsightPreviewMarkdown))
             {
-                if (TryReadEvidenceTable(root, "summary_rows_preview", out var cols, out var rows))
+                if (TryReadEvidenceTable(root, "summary_rows_preview", previewRowLimit, out var cols, out var rows))
                 {
-                    _ctxAccessor.LastInsightPreviewMarkdown = MarkdownTableRenderer.Render(cols, rows, language: _ctxAccessor.ResponseLanguage);
+                    _ctxAccessor.LastInsightPreviewMarkdown = MarkdownTableRenderer.Render(cols, rows, renderOptions);
                 }
             }
 
             if (string.Equals(toolName, "atomic.query.execute", StringComparison.OrdinalIgnoreCase)
                 && string.IsNullOrWhiteSpace(_ctxAccessor.LastListPreviewMarkdown))
             {
-                if (TryReadDisplayTable(root, out var cols, out var rows, out var title))
-                {
-                    _ctxAccessor.LastListPreviewTitle = title;
-                    _ctxAccessor.LastListPreviewMarkdown = MarkdownTableRenderer.Render(cols, rows, language: _ctxAccessor.ResponseLanguage);
-                }
+                if (TryReadDisplayTable(root, previewRowLimit, out var cols, out var rows, out _))
+                    _ctxAccessor.LastListPreviewMarkdown = MarkdownTableRenderer.Render(cols, rows, renderOptions);
             }
         }
         catch
@@ -422,7 +421,7 @@ public sealed class ChatPipeline
         }
     }
 
-    private static bool TryReadEvidenceTable(JsonElement root, string evidenceId, out List<string> columns, out List<object?[]> rows)
+    private static bool TryReadEvidenceTable(JsonElement root, string evidenceId, int maxRows, out List<string> columns, out List<object?[]> rows)
     {
         columns = new List<string>();
         rows = new List<object?[]>();
@@ -439,13 +438,13 @@ public sealed class ChatPipeline
             if (!item.TryGetProperty("payload", out var payloadEl) || payloadEl.ValueKind != JsonValueKind.Object)
                 continue;
 
-            return TryReadTablePayload(payloadEl, out columns, out rows);
+            return TryReadTablePayload(payloadEl, maxRows, out columns, out rows);
         }
 
         return false;
     }
 
-    private static bool TryReadDisplayTable(JsonElement root, out List<string> columns, out List<object?[]> rows, out string? title)
+    private static bool TryReadDisplayTable(JsonElement root, int maxRows, out List<string> columns, out List<object?[]> rows, out string? title)
     {
         columns = new List<string>();
         rows = new List<object?[]>();
@@ -468,13 +467,13 @@ public sealed class ChatPipeline
             if (!tableEl.TryGetProperty("table", out var tabularEl) || tabularEl.ValueKind != JsonValueKind.Object)
                 continue;
 
-            return TryReadTabularData(tabularEl, out columns, out rows);
+            return TryReadTabularData(tabularEl, maxRows, out columns, out rows);
         }
 
         return false;
     }
 
-    private static bool TryReadTablePayload(JsonElement payload, out List<string> columns, out List<object?[]> rows)
+    private static bool TryReadTablePayload(JsonElement payload, int maxRows, out List<string> columns, out List<object?[]> rows)
     {
         columns = new List<string>();
         rows = new List<object?[]>();
@@ -490,8 +489,8 @@ public sealed class ChatPipeline
 
         if (payload.TryGetProperty("rows", out var rowsEl) && rowsEl.ValueKind == JsonValueKind.Array)
         {
-            var maxRows = 50;
-            foreach (var rowEl in rowsEl.EnumerateArray().Take(maxRows))
+            var limit = Math.Clamp(maxRows, 1, 200);
+            foreach (var rowEl in rowsEl.EnumerateArray().Take(limit))
             {
                 if (rowEl.ValueKind != JsonValueKind.Array)
                     continue;
@@ -508,7 +507,7 @@ public sealed class ChatPipeline
         return columns.Count > 0;
     }
 
-    private static bool TryReadTabularData(JsonElement tabularEl, out List<string> columns, out List<object?[]> rows)
+    private static bool TryReadTabularData(JsonElement tabularEl, int maxRows, out List<string> columns, out List<object?[]> rows)
     {
         columns = new List<string>();
         rows = new List<object?[]>();
@@ -526,8 +525,8 @@ public sealed class ChatPipeline
 
         if (tabularEl.TryGetProperty("rows", out var rowsEl) && rowsEl.ValueKind == JsonValueKind.Array)
         {
-            var maxRows = 50;
-            foreach (var rowEl in rowsEl.EnumerateArray().Take(maxRows))
+            var limit = Math.Clamp(maxRows, 1, 200);
+            foreach (var rowEl in rowsEl.EnumerateArray().Take(limit))
             {
                 if (rowEl.ValueKind != JsonValueKind.Array)
                     continue;
@@ -580,16 +579,18 @@ public sealed class ChatPipeline
 
     private int ResolveMaxToolResultBytes()
     {
-        if (_tuning.MaxToolResultBytes > 0)
-            return _tuning.MaxToolResultBytes;
+        var maxBytes = _settings.Chat.MaxToolResultBytes;
+        if (maxBytes <= 0)
+            maxBytes = 16000;
+        return Math.Clamp(maxBytes, 1000, 200000);
+    }
 
-        if (_tuning.MaxToolResultChars > 0)
-        {
-            var approxBytes = _tuning.MaxToolResultChars * 2;
-            return Math.Clamp(approxBytes, 1000, 200000);
-        }
-
-        return 16000;
+    private int ResolvePreviewRowLimit()
+    {
+        var limit = _settings.AnalyticsEngine.PreviewRowLimit;
+        if (limit <= 0)
+            limit = 20;
+        return Math.Clamp(limit, 1, 200);
     }
 
     private ChatCompletionResponse MapToApiResponse(OpenAiChatCompletionResponse? raw, string model, string assistantContent, IReadOnlyCollection<ChatCompletionMessage> incoming)
@@ -642,6 +643,10 @@ public sealed class ChatPipeline
         };
     }
 }
+
+
+
+
 
 
 

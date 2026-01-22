@@ -1,7 +1,10 @@
 ﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using System.Text.Json;
 using TILSOFTAI.Application.Services;
+using TILSOFTAI.Configuration;
 using TILSOFTAI.Domain.ValueObjects;
+using TILSOFTAI.Orchestration.Chat.Localization;
 using TILSOFTAI.Orchestration.Formatting;
 using TILSOFTAI.Orchestration.SK;
 using TILSOFTAI.Orchestration.Contracts;
@@ -28,6 +31,8 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
     private readonly AnalyticsService _analyticsService;
     private readonly AtomicCatalogService _catalog;
     private readonly ExecutionContextAccessor _ctxAccessor;
+    private readonly AppSettings _settings;
+    private readonly IChatTextLocalizer _localizer;
     private readonly ILogger<AtomicQueryExecuteToolHandler> _logger;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
@@ -36,12 +41,16 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         AnalyticsService analyticsService,
         AtomicCatalogService catalog,
         ExecutionContextAccessor ctxAccessor,
+        IChatTextLocalizer localizer,
+        IOptions<AppSettings> settings,
         ILogger<AtomicQueryExecuteToolHandler> logger)
     {
         _atomicQueryService = atomicQueryService;
         _analyticsService = analyticsService;
         _catalog = catalog;
         _ctxAccessor = ctxAccessor;
+        _localizer = localizer;
+        _settings = settings.Value;
         _logger = logger;
     }
 
@@ -112,7 +121,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
             MaxDisplayRows = Math.Clamp(maxDisplayRows, 1, readOptions.MaxRowsPerTable)
         };
 
-        var parameters = ParseSqlParameters(dyn.GetJson("params"));
+        var (parameters, normalizedKeys) = ParseSqlParameters(dyn.GetJson("params"));
 
         // Filter params by catalog allow-list (Option 2): drop unknown params and emit warnings.
         var allowedParams = AtomicCatalogService.GetAllowedParamNames(catalogEntry.ParamsJson);
@@ -157,8 +166,8 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
             return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateFailure("atomic.query.execute blocked: invalid parameters", payloadInvalid), extrasInvalid);
         }
 
-        // Parameter normalization is intentionally not performed here.
-        // The LLM should determine appropriate filters and values using the ParamsJson contract from dbo.TILSOFTAI_SPCatalog.
+        // Parameter normalization here is limited to canonicalizing keys (trim + '@' prefix).
+        // The LLM must still follow ParamsJson for allowed filters and values.
         var normalizedParams = ApplyDefaults(filteredParams, defaultParams, allowedParams);
 
         var atomic = await _atomicQueryService.ExecuteAsync(spName, normalizedParams, readOptions, cancellationToken);
@@ -177,13 +186,18 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         var displayTables = new List<object>();
         var engineDatasets = new List<object>();
         var warnings = new List<string>();
+        if (normalizedKeys.Count > 0)
+        {
+            var preview = normalizedKeys.Take(5).ToArray();
+            var suffix = normalizedKeys.Count > 5 ? ", ..." : string.Empty;
+            warnings.Add($"Parameter keys normalized: {string.Join(", ", preview)}{suffix}");
+        }
         var schemaHints = ParseSchemaHints(catalogEntry.SchemaHintsJson);
         var schemaHintsByTable = schemaHints.Tables;
         var schemaHintsByResultSet = schemaHints.ResultSets;
         var schemaDigestTables = new List<object>();
         var engineDatasetDigests = new List<object>();
         TabularData? listPreviewTable = null;
-        string? listPreviewTitle = null;
 
         var resolvedTables = new List<(AtomicResultSet Table, ResultSetMetadata Meta)>();
         var missingMetadata = new List<object>();
@@ -207,7 +221,8 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
         if (missingMetadata.Count > 0)
         {
-            var payloadMissingMeta = BuildSchemaMetadataFailurePayload(spName, catalogEntry, missingMetadata);
+            var missingMetaMessage = _localizer.Get(ChatTextKeys.ErrorSchemaMetadataRequired);
+            var payloadMissingMeta = BuildSchemaMetadataFailurePayload(spName, catalogEntry, missingMetadata, missingMetaMessage);
             var extrasMissingMeta = new ToolDispatchExtras(
                 Source: new EnvelopeSourceV1 { System = "registry", Name = "dbo.TILSOFTAI_SPCatalog", Cache = "na" },
                 Evidence: new[]
@@ -216,7 +231,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
                     {
                         Id = "schema_metadata_required",
                         Type = "metric",
-                        Title = "Schema metadata required",
+                        Title = missingMetaMessage,
                         Payload = new { spName, missing = missingMetadata }
                     }
                 });
@@ -258,7 +273,6 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
                 if (listPreviewTable is null && trimmedTable.Rows.Count > 0)
                 {
                     listPreviewTable = trimmedTable;
-                    listPreviewTitle = meta.TableName;
                 }
 
                 var displayTrunc = new
@@ -358,8 +372,9 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
         if (listPreviewTable is not null)
         {
-            _ctxAccessor.LastListPreviewTitle = listPreviewTitle;
-            _ctxAccessor.LastListPreviewMarkdown = MarkdownTableRenderer.Render(listPreviewTable, language: _ctxAccessor.ResponseLanguage);
+            var previewRowLimit = Math.Clamp(_settings.AnalyticsEngine.PreviewRowLimit, 1, 200);
+            var renderOptions = new MarkdownTableRenderOptions { MaxRows = previewRowLimit };
+            _ctxAccessor.LastListPreviewMarkdown = MarkdownTableRenderer.Render(listPreviewTable, renderOptions);
         }
 
         var schemaDigest = new
@@ -372,8 +387,8 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
             datasets = engineDatasetDigests
         };
 
-        _ctxAccessor.LastSchemaDigestJson = JsonSerializer.Serialize(schemaDigest, Json);
-        _ctxAccessor.LastEngineDatasetsDigestJson = JsonSerializer.Serialize(engineDatasetsDigest, Json);
+        _ctxAccessor.LastSchemaDigest = JsonSerializer.Serialize(schemaDigest, Json);
+        _ctxAccessor.LastDatasetDigest = JsonSerializer.Serialize(engineDatasetsDigest, Json);
 
         var payload = new
         {
@@ -402,13 +417,11 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         // Evidence: provide a compact, stable slice so the client can always render an answer.
         var evidence = BuildEvidenceFromAtomicResult(spName, atomic, displayTables.Count, engineDatasets.Count, schemaDigest, engineDatasetsDigest, warnings);
 
-        // Cache key answer hints for deterministic fallback when circuit breaker trips.
-        CacheAnswerHints(spName, atomic, schemaHintsByResultSet);
-
+        var totalCount = TryGetIntFromSummary(atomic.Summary?.Table, "totalCount");
         _logger.LogInformation(
             "AtomicQueryExecute done sp={Sp} totalCount={TotalCount} displayTables={DisplayTables} engineDatasets={EngineDatasets} tables={Tables}",
             spName,
-            _ctxAccessor.LastTotalCount,
+            totalCount,
             displayTables.Count,
             engineDatasets.Count,
             atomic.Tables.Count);
@@ -420,91 +433,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateSuccess("atomic.query.execute executed", payload), extras);
     }
 
-    private void CacheAnswerHints(string spName, AtomicQueryResult atomic, IReadOnlyDictionary<int, SchemaHintsResultSet> resultSetHints)
-    {
-        var totalCount = TryGetIntFromSummary(atomic.Summary?.Table, "totalCount");
-        if (totalCount is null)
-            return;
-
-        _ctxAccessor.LastTotalCount = totalCount;
-        _ctxAccessor.LastStoredProcedure = spName;
-        var filters = BuildFiltersFromSummary(atomic);
-        _ctxAccessor.LastFilters = filters;
-
-        // Backward compatible fields used by older fallbacks/logs.
-        _ctxAccessor.LastSeasonFilter = TryGetStringFromSummary(atomic.Summary?.Table, "seasonFilter")
-            ?? (filters.TryGetValue("seasonFilter", out var s) ? s?.ToString() : null);
-        _ctxAccessor.LastCollectionFilter = TryGetStringFromSummary(atomic.Summary?.Table, "collectionFilter")
-            ?? (filters.TryGetValue("collectionFilter", out var c) ? c?.ToString() : null);
-        _ctxAccessor.LastRangeNameFilter = TryGetStringFromSummary(atomic.Summary?.Table, "rangeNameFilter")
-            ?? (filters.TryGetValue("rangeNameFilter", out var r) ? r?.ToString() : null);
-        _ctxAccessor.LastDisplayPreviewJson = TryBuildDisplayPreviewJson(atomic, resultSetHints, maxRows: 12, maxCols: 12);
-    }
-
-    
-    private static object? TryBuildDisplayPreviewPayload(AtomicQueryResult atomic, IReadOnlyDictionary<int, SchemaHintsResultSet> resultSetHints, int maxRows, int maxCols)
-    {
-        maxRows = Math.Clamp(maxRows, 1, 50);
-        maxCols = Math.Clamp(maxCols, 1, 30);
-
-        if (atomic is null || atomic.Tables is null || atomic.Tables.Count == 0)
-            return null;
-
-        var chosen = atomic.Tables
-            .Select(t => new { Table = t, Meta = TryResolveResultSetMeta(t.Schema, resultSetHints, out var meta) ? meta : null })
-            .FirstOrDefault(t =>
-                t.Meta is not null &&
-                (t.Meta.Delivery == "display" || t.Meta.Delivery == "both") &&
-                t.Table.Table?.Rows is not null &&
-                t.Table.Table.Rows.Count > 0);
-
-        if (chosen is null || chosen.Table.Table is null || chosen.Table.Table.Rows.Count == 0 || chosen.Meta is null)
-            return null;
-
-        var cols = chosen.Table.Table.Columns.Take(maxCols).Select(c => c.Name).ToArray();
-        var rows = new List<Dictionary<string, object?>>(Math.Min(maxRows, chosen.Table.Table.Rows.Count));
-
-        for (var r = 0; r < Math.Min(maxRows, chosen.Table.Table.Rows.Count); r++)
-        {
-            var src = chosen.Table.Table.Rows[r];
-            var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-            for (var c = 0; c < cols.Length; c++)
-            {
-                dict[cols[c]] = src[c];
-            }
-            rows.Add(dict);
-        }
-
-        return new
-        {
-            tableName = chosen.Meta.TableName,
-            tableKind = chosen.Meta.TableKind,
-            delivery = chosen.Meta.Delivery,
-            columns = cols,
-            rowsReturned = chosen.Table.Table.Rows.Count,
-            preview = rows
-        };
-    }
-
-    private static string? TryBuildDisplayPreviewJson(AtomicQueryResult atomic, IReadOnlyDictionary<int, SchemaHintsResultSet> resultSetHints, int maxRows, int maxCols)
-    {
-        var payload = TryBuildDisplayPreviewPayload(atomic, resultSetHints, maxRows, maxCols);
-        if (payload is null) return null;
-
-        try
-        {
-            var json = JsonSerializer.Serialize(payload);
-            if (json.Length > 6000)
-                json = json.Substring(0, 6000) + "...";
-            return json;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResult(
+    private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResult(
         string spName,
         AtomicQueryResult atomic,
         int displayTableCount,
@@ -1019,18 +948,6 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
         return null;
     }
 
-    private static string? TryGetStringFromSummary(TabularData? summary, string columnName)
-    {
-        if (summary is null || summary.Rows.Count == 0)
-            return null;
-
-        var idx = FindColumnIndex(summary, columnName);
-        if (idx < 0)
-            return null;
-
-        return summary.Rows[0][idx]?.ToString();
-    }
-
     /// <summary>
     /// Build a generic filter payload from RS1 summary using deterministic schema.
     ///
@@ -1121,24 +1038,34 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
         return sp;
     }
 
-    private static IReadOnlyDictionary<string, object?> ParseSqlParameters(JsonElement? je)
+        private static (IReadOnlyDictionary<string, object?> Parameters, IReadOnlyList<string> NormalizedKeys) ParseSqlParameters(JsonElement? je)
     {
         if (je is null || je.Value.ValueKind == JsonValueKind.Undefined || je.Value.ValueKind == JsonValueKind.Null)
-            return new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            return (new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase), Array.Empty<string>());
 
         if (je.Value.ValueKind != JsonValueKind.Object)
             throw new ArgumentException("params must be a JSON object.");
 
         var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        var normalized = new List<string>();
+
         foreach (var prop in je.Value.EnumerateObject())
         {
-            dict[prop.Name] = ConvertJsonValue(prop.Value);
+            var originalKey = prop.Name ?? string.Empty;
+            var trimmed = originalKey.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed))
+                continue;
+
+            var normalizedKey = trimmed.StartsWith("@", StringComparison.Ordinal) ? trimmed : "@" + trimmed;
+            if (!string.Equals(originalKey, normalizedKey, StringComparison.Ordinal) || !string.Equals(originalKey, trimmed, StringComparison.Ordinal))
+                normalized.Add($"{originalKey}->{normalizedKey}");
+
+            dict[normalizedKey] = ConvertJsonValue(prop.Value);
         }
 
-        return dict;
+        return (dict, normalized);
     }
-
-    private static (IReadOnlyDictionary<string, object?> Filtered, List<string> Dropped) FilterParams(
+private static (IReadOnlyDictionary<string, object?> Filtered, List<string> Dropped) FilterParams(
         IReadOnlyDictionary<string, object?> parameters,
         IReadOnlySet<string> allowedParams)
     {
@@ -1149,19 +1076,8 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
         // We keep the provided params and rely on DB metadata filtering at execution time (see AtomicQueryRepository).
         if (allowedParams is null || allowedParams.Count == 0)
         {
-            var normalized = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-            foreach (var kv in parameters)
-            {
-                var name = kv.Key;
-                if (string.IsNullOrWhiteSpace(name))
-                    continue;
-
-                if (!name.StartsWith("@", StringComparison.Ordinal))
-                    name = "@" + name;
-
-                normalized[name] = kv.Value;
-            }
-            return (normalized, new List<string>());
+            var copy = new Dictionary<string, object?>(parameters, StringComparer.OrdinalIgnoreCase);
+            return (copy, new List<string>());
         }
 
         var filtered = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
@@ -1172,7 +1088,7 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
             var normalized = AtomicCatalogService.NormalizeParamName(kv.Key);
             if (allowedParams.Contains(normalized))
             {
-                // Keep original key; repository will normalize to @param.
+                // Keep normalized key; repository will normalize to @param.
                 filtered[kv.Key] = kv.Value;
             }
             else
@@ -1183,8 +1099,7 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
 
         return (filtered, dropped);
     }
-
-    private static IReadOnlyDictionary<string, object?> ApplyDefaults(
+private static IReadOnlyDictionary<string, object?> ApplyDefaults(
         IReadOnlyDictionary<string, object?> parameters,
         IReadOnlyDictionary<string, object?> defaults,
         IReadOnlySet<string> allowedParams)
@@ -1304,10 +1219,11 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
         };
     }
 
-    private static object BuildSchemaMetadataFailurePayload(
+        private static object BuildSchemaMetadataFailurePayload(
         string spName,
         AtomicCatalogEntry catalogEntry,
-        IReadOnlyList<object> missingResultSets)
+        IReadOnlyList<object> missingResultSets,
+        string message)
     {
         return new
         {
@@ -1318,7 +1234,7 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
             error = new
             {
                 code = "SCHEMA_METADATA_REQUIRED",
-                message = "Schema metadata is required to route result sets. Provide RS0 delivery/datasetName or SPCatalog.SchemaHintsJson.resultSets."
+                message
             },
             remediation = new
             {
@@ -1350,12 +1266,11 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
             },
             warnings = new[]
             {
-                "SCHEMA_METADATA_REQUIRED: RS0 delivery/datasetName or SchemaHintsJson.resultSets is required for data tables."
+                $"SCHEMA_METADATA_REQUIRED: {message}"
             }
         };
     }
-
-    private static object? ConvertJsonValue(JsonElement v)
+private static object? ConvertJsonValue(JsonElement v)
     {
         switch (v.ValueKind)
         {
@@ -1398,16 +1313,6 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
         };
     }
 
-    private static TabularData TrimRows(TabularData table, int maxRows)
-    {
-        maxRows = Math.Clamp(maxRows, 0, 200000);
-        if (maxRows == 0 || table.Rows.Count <= maxRows)
-            return table;
-
-        var rows = table.Rows.Take(maxRows).ToArray();
-        return new TabularData(table.Columns, rows, table.TotalCount);
-    }
-
     private sealed record RoutingDecision(bool Engine, bool Display, string Reason);
 
     private sealed record RoutingPolicyOptions(int MaxDisplayRows)
@@ -1439,4 +1344,16 @@ private static IReadOnlyList<EnvelopeEvidenceItemV1> BuildEvidenceFromAtomicResu
 
 
 }
+
+
+
+
+
+
+
+
+
+
+
+
 

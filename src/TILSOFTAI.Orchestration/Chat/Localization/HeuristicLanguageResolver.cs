@@ -1,5 +1,7 @@
+﻿using System.Globalization;
 using System.Text.RegularExpressions;
-using TILSOFTAI.Orchestration.Llm;
+using Microsoft.Extensions.Options;
+using TILSOFTAI.Configuration;
 
 namespace TILSOFTAI.Orchestration.Chat.Localization;
 
@@ -9,6 +11,11 @@ namespace TILSOFTAI.Orchestration.Chat.Localization;
 /// </summary>
 public sealed class HeuristicLanguageResolver : ILanguageResolver
 {
+    private const string DefaultEnglishCulture = "en-US";
+    private const string DefaultVietnameseCulture = "vi-VN";
+
+    private readonly string _defaultCulture;
+
     private static readonly Regex EnSignals = new(
         @"(?i)\b(how many|what|which|show|list|count|season|collection|model|customer|order|price|in the system|with)\b",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -16,11 +23,15 @@ public sealed class HeuristicLanguageResolver : ILanguageResolver
     private static readonly Regex ViSignals = new(
         // Vietnamese signals (including no-diacritic variants). Avoid English-only tokens like "season"/"collection"
         // to prevent misclassification when the user asks in English.
-        @"(?i)\b(bao\s*nhieu|bao\s*nhieu\?|dem|đếm|so\s*luong|so\s*luong\s*bao\s*nhieu|tong\s*so|mua|mùa|bo\s*suu\s*tap|bộ\s*sưu\s*tập|khach\s*hang|khách\s*hàng|don\s*hang|đơn\s*hàng|gia|giá|tim|tìm|liet\s*ke|liệt\s*kê|danh\s*sach|danh\s*sách)\b",
+        @"(?i)\b(bao\s*nhieu|dem|so\s*luong|tong\s*so|mua|bo\s*suu\s*tap|khach\s*hang|don\s*hang|gia|tim|liet\s*ke|danh\s*sach)\b",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    public HeuristicLanguageResolver(IOptions<AppSettings> settings)
+    {
+        _defaultCulture = NormalizeCulture(settings.Value.Localization.DefaultCulture);
+    }
 
-    public ChatLanguage Resolve(IReadOnlyCollection<ChatCompletionMessage> incomingMessages)
+    public string Resolve(IReadOnlyCollection<ChatCompletionMessage> incomingMessages)
     {
         // Use the last non-empty user message as primary signal.
         var lastUser = incomingMessages.LastOrDefault(m =>
@@ -29,29 +40,52 @@ public sealed class HeuristicLanguageResolver : ILanguageResolver
 
         if (!string.IsNullOrWhiteSpace(lastUser))
         {
-            if (ContainsVietnameseDiacritics(lastUser)) return ChatLanguage.Vi;
-            if (ViSignals.IsMatch(lastUser)) return ChatLanguage.Vi;
-            if (EnSignals.IsMatch(lastUser)) return ChatLanguage.En;
+            if (ContainsVietnameseDiacritics(lastUser)) return DefaultVietnameseCulture;
+            if (ViSignals.IsMatch(lastUser)) return DefaultVietnameseCulture;
+            if (EnSignals.IsMatch(lastUser)) return DefaultEnglishCulture;
         }
 
-        // Default to English.
-        return ChatLanguage.En;
+        // Deterministic fallback from settings.
+        return _defaultCulture;
     }
 
     private static bool ContainsVietnameseDiacritics(string text)
     {
-        // Common Vietnamese-specific letters and combining patterns.
-        // This is a fast heuristic; it is intentionally not exhaustive.
         foreach (var ch in text)
         {
-            if (ch is 'đ' or 'Đ' or 'ă' or 'Ă' or 'â' or 'Â' or 'ê' or 'Ê' or 'ô' or 'Ô' or 'ơ' or 'Ơ' or 'ư' or 'Ư')
+            if (ch is '\u0111' or '\u0110')
                 return true;
 
             // Combining diacritics block (covers most accented Latin characters)
             if (ch >= '\u0300' && ch <= '\u036F')
                 return true;
+
+            var category = CharUnicodeInfo.GetUnicodeCategory(ch);
+            if (category == UnicodeCategory.NonSpacingMark)
+                return true;
         }
 
         return false;
+    }
+
+    private static string NormalizeCulture(string? input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+            return DefaultEnglishCulture;
+
+        var trimmed = input.Trim();
+        if (string.Equals(trimmed, "vi", StringComparison.OrdinalIgnoreCase))
+            return DefaultVietnameseCulture;
+        if (string.Equals(trimmed, "en", StringComparison.OrdinalIgnoreCase))
+            return DefaultEnglishCulture;
+
+        try
+        {
+            return CultureInfo.GetCultureInfo(trimmed).Name;
+        }
+        catch (CultureNotFoundException)
+        {
+            return DefaultEnglishCulture;
+        }
     }
 }

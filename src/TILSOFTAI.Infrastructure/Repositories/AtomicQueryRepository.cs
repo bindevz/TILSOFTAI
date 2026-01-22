@@ -2,13 +2,14 @@ using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 using System.Data;
+using TILSOFTAI.Configuration;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Domain.ValueObjects;
 using TILSOFTAI.Infrastructure.Data;
 using TILSOFTAI.Infrastructure.Data.Tabular;
-using TILSOFTAI.Infrastructure.Options;
 
 namespace TILSOFTAI.Infrastructure.Repositories;
 
@@ -71,20 +72,20 @@ public sealed class AtomicQueryRepository : IAtomicQueryRepository
     private readonly ILogger<AtomicQueryRepository> _logger;
     private readonly ITableKindSignalsRepository? _tableKindSignalsRepository;
     private readonly IAppCache? _cache;
-    private readonly SqlOptions _sqlOptions;
+    private readonly SqlSettings _sql;
 
     public AtomicQueryRepository(
         SqlServerDbContext dbContext,
         ILogger<AtomicQueryRepository>? logger = null,
         ITableKindSignalsRepository? tableKindSignalsRepository = null,
         IAppCache? cache = null,
-        SqlOptions? sqlOptions = null)
+        IOptions<AppSettings>? settings = null)
     {
         _dbContext = dbContext;
         _logger = logger ?? NullLogger<AtomicQueryRepository>.Instance;
         _tableKindSignalsRepository = tableKindSignalsRepository;
         _cache = cache;
-        _sqlOptions = sqlOptions ?? new SqlOptions();
+        _sql = (settings?.Value ?? new AppSettings()).Sql;
     }
 
     public async Task<AtomicQueryResult> ExecuteAsync(
@@ -100,7 +101,7 @@ public sealed class AtomicQueryRepository : IAtomicQueryRepository
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = storedProcedure;
         cmd.CommandType = CommandType.StoredProcedure;
-        var timeoutSeconds = _sqlOptions.CommandTimeoutSeconds <= 0 ? 60 : _sqlOptions.CommandTimeoutSeconds;
+        var timeoutSeconds = _sql.CommandTimeoutSeconds <= 0 ? 60 : _sql.CommandTimeoutSeconds;
         cmd.CommandTimeout = Math.Clamp(timeoutSeconds, 5, 1800);
 
         _logger.LogInformation("AtomicQueryRepository.Execute start sp={Sp} paramCount={ParamCount}", storedProcedure, parameters?.Count ?? 0);

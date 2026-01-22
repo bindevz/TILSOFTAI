@@ -1,5 +1,6 @@
 using TILSOFTAI.Domain.ValueObjects;
 using TILSOFTAI.Orchestration.Contracts;
+using TILSOFTAI.Orchestration.Contracts.Validation;
 using TILSOFTAI.Orchestration.Llm;
 using TILSOFTAI.Orchestration.Tools.Modularity;
 

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=8.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=8.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <data name="SystemPrompt" xml:space="preserve">
+    <value>You are an ERP assistant.
+
+Mode B rules:
+- Tool order: if you need to discover a stored procedure by domain/context, call atomic.catalog.search first, then atomic.query.execute. For deeper analysis (group/pivot/sum/avg/topN), use analytics.run with the datasetId from atomic.query.execute.
+- OUTPUT: Return only plain insight text. Do NOT include Markdown headings, tables, lists, JSON, or tool calls.
+- Data boundary: use only bounded evidence provided by tools (schema digests + previews). Do not infer from raw rows that are not shown.
+- No implicit filter merging: do not merge previous filters unless the user explicitly asks.
+- Only call tools that are exposed in this session.</value>
+  </data>
+  <data name="BlockTitle_Insight" xml:space="preserve">
+    <value>Conclusion / Insight</value>
+  </data>
+  <data name="BlockTitle_InsightPreview" xml:space="preserve">
+    <value>Insight Preview</value>
+  </data>
+  <data name="BlockTitle_ListPreview" xml:space="preserve">
+    <value>List Preview</value>
+  </data>
+  <data name="TableTruncationNote" xml:space="preserve">
+    <value>Showing {0} of {1} rows (truncated).</value>
+  </data>
+  <data name="ToolNotAllowed" xml:space="preserve">
+    <value>Tool not allowed.</value>
+  </data>
+  <data name="FallbackNoContent" xml:space="preserve">
+    <value>I could not produce an answer at this time. Please retry or provide more details.</value>
+  </data>
+  <data name="PreviousQueryHint" xml:space="preserve">
+    <value>If this is a follow-up, please restate the previous query.</value>
+  </data>
+  <data name="Error_SchemaMetadataRequired" xml:space="preserve">
+    <value>Schema metadata is required to route result sets. Provide RS0 delivery/datasetName or SPCatalog.SchemaHintsJson.resultSets.</value>
+  </data>
+  <data name="Error_InvalidPlan" xml:space="preserve">
+    <value>Pipeline validation failed. Fix the plan and retry.</value>
+  </data>
+</root>

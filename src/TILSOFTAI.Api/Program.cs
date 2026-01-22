@@ -1,16 +1,19 @@
-using System.Net.Http.Headers;
+﻿using System.Net.Http.Headers;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
+using TILSOFTAI.Api.Configuration;
 using TILSOFTAI.Api.DependencyInjection;
+using TILSOFTAI.Api.Middleware;
+using TILSOFTAI.Configuration;
 using TILSOFTAI.Orchestration.Chat;
 using TILSOFTAI.Orchestration.Chat.Localization;
-using TILSOFTAI.Orchestration.Llm;
 using TILSOFTAI.Orchestration.Llm.OpenAi;
-using TILSOFTAI.Api.Middleware;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Configuration.AddEnvironmentVariables();
+
+builder.Services.AddAppSettings(builder.Configuration);
 
 builder.Services.AddControllers();
 builder.Services.AddMemoryCache();
@@ -18,9 +21,10 @@ builder.Services.AddHttpContextAccessor();
 
 builder.Services.Configure<RouteOptions>(options => options.LowercaseUrls = true);
 
-builder.Services.AddDbContext<TILSOFTAI.Infrastructure.Data.SqlServerDbContext>(options =>
+builder.Services.AddDbContext<TILSOFTAI.Infrastructure.Data.SqlServerDbContext>((sp, options) =>
 {
-    var connectionString = builder.Configuration.GetConnectionString("SqlServer")
+    var settings = sp.GetRequiredService<IOptions<AppSettings>>().Value;
+    var connectionString = builder.Configuration.GetConnectionString(settings.Sql.ConnectionStringName)
         ?? throw new InvalidOperationException("SQL Server connection string is missing.");
     options.UseSqlServer(connectionString, sql => sql.EnableRetryOnFailure());
 });
@@ -33,25 +37,19 @@ builder.Services.AddSingleton<TILSOFTAI.Infrastructure.Caching.AppMemoryCache>()
 builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAppCache>(sp =>
     sp.GetRequiredService<TILSOFTAI.Infrastructure.Caching.AppMemoryCache>());
 
-builder.Services.Configure<TILSOFTAI.Infrastructure.Caching.AnalyticsDatasetStoreOptions>(
-    builder.Configuration.GetSection("AnalyticsDatasetStore"));
-builder.Services.AddSingleton(sp => sp
-    .GetRequiredService<IOptions<TILSOFTAI.Infrastructure.Caching.AnalyticsDatasetStoreOptions>>()
-    .Value);
-
 builder.Services.AddSingleton<TILSOFTAI.Infrastructure.Caching.InMemoryAnalyticsDatasetStore>();
 builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAnalyticsDatasetStore>(sp =>
 {
-    var opt = sp.GetRequiredService<TILSOFTAI.Infrastructure.Caching.AnalyticsDatasetStoreOptions>();
+    var settings = sp.GetRequiredService<IOptions<AppSettings>>().Value;
+    var redis = settings.Redis;
     var fallback = sp.GetRequiredService<TILSOFTAI.Infrastructure.Caching.InMemoryAnalyticsDatasetStore>();
 
-    if (string.Equals(opt.Provider, "redis", StringComparison.OrdinalIgnoreCase) &&
-        !string.IsNullOrWhiteSpace(opt.RedisConnection))
+    if (redis.Enabled && !string.IsNullOrWhiteSpace(redis.ConnectionString))
     {
         try
         {
-            var mux = ConnectionMultiplexer.Connect(opt.RedisConnection);
-            return new TILSOFTAI.Infrastructure.Caching.RedisAnalyticsDatasetStore(mux, fallback, opt);
+            var mux = ConnectionMultiplexer.Connect(redis.ConnectionString);
+            return new TILSOFTAI.Infrastructure.Caching.RedisAnalyticsDatasetStore(mux, fallback, redis);
         }
         catch
         {
@@ -62,24 +60,18 @@ builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAnalyticsDatasetStore
     return fallback;
 });
 
-builder.Services.Configure<TILSOFTAI.Application.Analytics.AnalyticsResultCacheOptions>(
-    builder.Configuration.GetSection("AnalyticsResultCache"));
-builder.Services.AddSingleton(sp => sp
-    .GetRequiredService<IOptions<TILSOFTAI.Application.Analytics.AnalyticsResultCacheOptions>>()
-    .Value);
-
 builder.Services.AddSingleton<TILSOFTAI.Infrastructure.Caching.InMemoryAnalysisResultCache>();
 builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAnalyticsResultCache>(sp =>
 {
-    var opt = sp.GetRequiredService<TILSOFTAI.Application.Analytics.AnalyticsResultCacheOptions>();
+    var settings = sp.GetRequiredService<IOptions<AppSettings>>().Value;
+    var redis = settings.Redis;
     var fallback = sp.GetRequiredService<TILSOFTAI.Infrastructure.Caching.InMemoryAnalysisResultCache>();
 
-    if (string.Equals(opt.Provider, "redis", StringComparison.OrdinalIgnoreCase) &&
-        !string.IsNullOrWhiteSpace(opt.RedisConnection))
+    if (redis.Enabled && !string.IsNullOrWhiteSpace(redis.ConnectionString))
     {
         try
         {
-            var mux = ConnectionMultiplexer.Connect(opt.RedisConnection);
+            var mux = ConnectionMultiplexer.Connect(redis.ConnectionString);
             return new TILSOFTAI.Infrastructure.Caching.RedisAnalysisResultCache(mux, fallback);
         }
         catch
@@ -90,7 +82,6 @@ builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAnalyticsResultCache>
 
     return fallback;
 });
-
 // Tool schemas
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolSchemas.IToolInputSpecProvider, TILSOFTAI.Orchestration.Modules.Analytics.AnalyticsToolInputSpecProvider>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolSchemas.ToolInputSpecCatalog>();
@@ -114,48 +105,23 @@ builder.Services.AddSingleton<TILSOFTAI.Domain.Interfaces.IAuditLogger, TILSOFTA
 // Auto registrations (Application Services + Infrastructure Repositories)
 builder.Services.AddTilsoftaiAutoRegistrations();
 
-// SQL options
-builder.Services.Configure<TILSOFTAI.Infrastructure.Options.SqlOptions>(
-    builder.Configuration.GetSection("Sql"));
-builder.Services.AddSingleton(sp => sp
-    .GetRequiredService<IOptions<TILSOFTAI.Infrastructure.Options.SqlOptions>>()
-    .Value);
-
 // Runtime response schema validation
-builder.Services.Configure<TILSOFTAI.Orchestration.Contracts.Validation.ResponseSchemaValidationOptions>(
-    builder.Configuration.GetSection("ContractValidation"));
-builder.Services.AddSingleton(sp => sp
-    .GetRequiredService<IOptions<TILSOFTAI.Orchestration.Contracts.Validation.ResponseSchemaValidationOptions>>()
-    .Value);
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Contracts.Validation.IResponseSchemaValidator,
     TILSOFTAI.Orchestration.Contracts.Validation.ResponseSchemaValidator>();
 
-// LLM options
-var lmStudioOptions = new LmStudioOptions();
-builder.Configuration.GetSection("LmStudio").Bind(lmStudioOptions);
-builder.Services.AddSingleton(lmStudioOptions);
-
 builder.Services.AddHttpClient<OpenAiChatClient>((sp, http) =>
 {
-    var lm = sp.GetRequiredService<LmStudioOptions>();
-    http.BaseAddress = new Uri(lm.BaseUrl.TrimEnd('/') + "/v1/");
+    var lm = sp.GetRequiredService<IOptions<AppSettings>>().Value.Llm;
+    http.BaseAddress = new Uri(lm.Endpoint.TrimEnd('/') + "/v1/");
     http.Timeout = TimeSpan.FromSeconds(Math.Clamp(lm.TimeoutSeconds, 5, 1800));
     http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "lm-studio");
 });
 
 builder.Services.AddSingleton<OpenAiToolSchemaFactory>();
-builder.Services.AddSingleton<TokenBudget>();
 
-// Chat tuning
-builder.Services.Configure<ChatTuningOptions>(builder.Configuration.GetSection("ChatTuning"));
-builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<ChatTuningOptions>>().Value);
-
-// Orchestration feature flags
 // Localization
 builder.Services.AddSingleton<ILanguageResolver, HeuristicLanguageResolver>();
-builder.Services.AddSingleton<IChatTextLocalizer, DefaultChatTextLocalizer>();
-builder.Services.AddSingleton<ChatTextPatterns>();
-
+builder.Services.AddSingleton<IChatTextLocalizer, ResxChatTextLocalizer>();
 // ToolInvoker infra
 builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.ExecutionContextAccessor>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.SK.ToolInvoker>();
@@ -212,3 +178,8 @@ static bool ContainsInlinePassword(string? connectionString)
 
     return connectionString.IndexOf("Password=", StringComparison.OrdinalIgnoreCase) >= 0;
 }
+
+
+
+
+

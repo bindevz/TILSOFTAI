@@ -1,6 +1,9 @@
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 using TILSOFTAI.Application.Services;
+using TILSOFTAI.Configuration;
 using TILSOFTAI.Domain.ValueObjects;
+using TILSOFTAI.Orchestration.Chat.Localization;
 using TILSOFTAI.Orchestration.Contracts;
 using TILSOFTAI.Orchestration.Formatting;
 using TILSOFTAI.Orchestration.SK;
@@ -15,11 +18,19 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
 
     private readonly AnalyticsService _analyticsService;
     private readonly ExecutionContextAccessor _ctxAccessor;
+    private readonly AppSettings _settings;
+    private readonly IChatTextLocalizer _localizer;
 
-    public AnalyticsRunToolHandler(AnalyticsService analyticsService, ExecutionContextAccessor ctxAccessor)
+    public AnalyticsRunToolHandler(
+        AnalyticsService analyticsService,
+        ExecutionContextAccessor ctxAccessor,
+        IOptions<AppSettings> settings,
+        IChatTextLocalizer localizer)
     {
         _analyticsService = analyticsService;
         _ctxAccessor = ctxAccessor;
+        _settings = settings.Value;
+        _localizer = localizer;
     }
 
     public async Task<ToolDispatchResult> HandleAsync(object intent, TSExecutionContext context, CancellationToken cancellationToken)
@@ -31,8 +42,10 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
 
         var bounds = new AnalyticsService.RunBounds(
             TopN: dyn.GetInt("topN", 20),
-            MaxGroups: dyn.GetInt("maxGroups", 200),
-            MaxResultRows: dyn.GetInt("maxResultRows", 500));
+            MaxGroups: dyn.GetInt("maxGroups", _settings.AnalyticsEngine.MaxGroups),
+            MaxResultRows: dyn.GetInt("maxResultRows", 500),
+            MaxJoinRows: _settings.AnalyticsEngine.MaxJoinRows,
+            MaxJoinMatchesPerLeft: _settings.AnalyticsEngine.MaxJoinMatchesPerLeft);
 
         if (!_analyticsService.TryGetDatasetSchema(datasetId, context, out var baseSchema, out var schemaError))
         {
@@ -43,7 +56,7 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
         var validationErrors = ValidatePipeline(pipeline, baseSchema, context);
         if (validationErrors.Count > 0)
         {
-            var errorPayload = BuildFailurePayload(datasetId, "invalid_pipeline", "Pipeline validation failed.", validationErrors);
+            var errorPayload = BuildFailurePayload(datasetId, "invalid_pipeline", _localizer.Get(ChatTextKeys.ErrorInvalidPlan), validationErrors);
             return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateFailure("analytics.run invalid pipeline", errorPayload));
         }
 
@@ -58,7 +71,7 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
             return ToolDispatchResultFactory.Create(dyn, ToolExecutionResult.CreateFailure("analytics.run failed", errorPayload));
         }
 
-        const int previewRowLimit = 20;
+        var previewRowLimit = Math.Clamp(_settings.AnalyticsEngine.PreviewRowLimit, 1, 200);
         var previewRows = result.Rows.Take(previewRowLimit).ToArray();
         var payloadEvidence = new
         {
@@ -92,7 +105,8 @@ public sealed class AnalyticsRunToolHandler : IToolHandler
             evidence = payloadEvidence
         };
 
-        _ctxAccessor.LastInsightPreviewMarkdown = MarkdownTableRenderer.Render(new AnalyticsSchema(result.Schema), previewRows, language: _ctxAccessor.ResponseLanguage);
+        var renderOptions = new MarkdownTableRenderOptions { MaxRows = previewRowLimit };
+        _ctxAccessor.LastInsightPreviewMarkdown = MarkdownTableRenderer.Render(new AnalyticsSchema(result.Schema), previewRows, renderOptions);
 
         var evidence = new List<EnvelopeEvidenceItemV1>
         {

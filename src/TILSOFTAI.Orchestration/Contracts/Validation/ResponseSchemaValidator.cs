@@ -3,6 +3,7 @@ using System.Text.Json;
 using Json.Schema;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using TILSOFTAI.Configuration;
 using TILSOFTAI.Orchestration.Llm;
 
 namespace TILSOFTAI.Orchestration.Contracts.Validation;
@@ -21,7 +22,7 @@ public sealed class ResponseSchemaValidator : IResponseSchemaValidator
     private static readonly JsonSerializerOptions InstanceJson = new(JsonSerializerDefaults.Web);
 
     private readonly ILogger<ResponseSchemaValidator> _log;
-    private readonly ResponseSchemaValidationOptions _opt;
+    private readonly StrictModeSettings _strict;
 
     // Build-time registry for $ref resolution.
     private readonly SchemaRegistry _schemaRegistry = new();
@@ -32,12 +33,18 @@ public sealed class ResponseSchemaValidator : IResponseSchemaValidator
     private readonly HashSet<string> _enforcedKinds;
 
     public ResponseSchemaValidator(
-        IOptions<ResponseSchemaValidationOptions> options,
+        IOptions<AppSettings> options,
         ILogger<ResponseSchemaValidator> log)
     {
         _log = log;
-        _opt = options?.Value ?? new ResponseSchemaValidationOptions();
-        _enforcedKinds = new HashSet<string>(_opt.EnforcedKinds ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
+        var settings = options?.Value ?? new AppSettings();
+        _strict = settings.Orchestration.StrictMode ?? new StrictModeSettings();
+        _enforcedKinds = new HashSet<string>(new[]
+        {
+            "atomic.query.execute.v1",
+            "atomic.catalog.search.v1",
+            "analytics.run.v1"
+        }, StringComparer.OrdinalIgnoreCase);
 
         // Ensure draft 2020-12 as default dialect to match governance schemas.
         Dialect.Default = Dialect.Draft202012;
@@ -48,19 +55,19 @@ public sealed class ResponseSchemaValidator : IResponseSchemaValidator
             SchemaRegistry = _schemaRegistry
         };
 
-        if (!_opt.Enabled)
+        if (!_strict.ResponseSchemaValidationEnabled)
         {
             _log.LogInformation("Response schema validation disabled.");
             return;
         }
 
-        var root = TryLocateContractsRoot(_opt.ContractsRootPath);
+        var root = TryLocateContractsRoot(null);
         if (root is null)
         {
             var msg = "Could not locate governance/contracts for runtime schema validation. " +
-                      "Ensure governance/contracts is deployed (copied to output) or set ContractValidation:ContractsRootPath.";
+                      "Ensure governance/contracts is deployed (copied to output).";
             // Fail fast only if we have enforced kinds; otherwise downgrade to warning.
-            if (_enforcedKinds.Count > 0)
+            if (_enforcedKinds.Count > 0 && _strict.FailOnMissingSchemaForEnforcedKinds)
                 throw new InvalidOperationException(msg);
 
             _log.LogWarning(msg);
@@ -72,7 +79,7 @@ public sealed class ResponseSchemaValidator : IResponseSchemaValidator
 
     public void ValidateOrThrow(object? payload, string toolName)
     {
-        if (!_opt.Enabled)
+        if (!_strict.ResponseSchemaValidationEnabled)
             return;
 
         if (payload is null)
@@ -104,13 +111,13 @@ public sealed class ResponseSchemaValidator : IResponseSchemaValidator
         var schemaVersion = verEl.GetInt32();
 
         var isEnforced = _enforcedKinds.Contains(kind);
-        if (!isEnforced && !_opt.ValidateAllKindsWithSchema)
+        if (!isEnforced && !_strict.ValidateAllKindsWithSchema)
             return;
 
         var key = MakeKey(schemaVersion, kind);
         if (!_schemas.TryGetValue(key, out var schema))
         {
-            if (isEnforced && _opt.FailOnMissingSchemaForEnforcedKinds)
+            if (isEnforced && _strict.FailOnMissingSchemaForEnforcedKinds)
             {
                 throw new ResponseContractException(
                     $"Missing response schema for kind '{kind}' (schemaVersion {schemaVersion}). Tool='{toolName}'.");

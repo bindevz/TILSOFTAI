@@ -2,7 +2,10 @@ using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using System.Security;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
+using TILSOFTAI.Configuration;
 using TILSOFTAI.Orchestration.Chat;
+using TILSOFTAI.Orchestration.Chat.Localization;
 using TILSOFTAI.Application.Permissions;
 using TILSOFTAI.Orchestration.Contracts;
 using TILSOFTAI.Orchestration.Contracts.Evidence;
@@ -20,6 +23,8 @@ public sealed class ToolInvoker
     private readonly RbacService _rbac;
     private readonly ExecutionContextAccessor _ctx;
     private readonly IResponseSchemaValidator _responseSchemaValidator;
+    private readonly IChatTextLocalizer _localizer;
+    private readonly AppSettings _settings;
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
 
     public ToolInvoker(
@@ -28,6 +33,8 @@ public sealed class ToolInvoker
         RbacService rbac,
         ExecutionContextAccessor ctx,
         IResponseSchemaValidator responseSchemaValidator,
+        IChatTextLocalizer localizer,
+        IOptions<AppSettings> settings,
         ILogger<ToolInvoker> logger)
     {
         _registry = registry;
@@ -35,6 +42,8 @@ public sealed class ToolInvoker
         _rbac = rbac;
         _ctx = ctx;
         _responseSchemaValidator = responseSchemaValidator;
+        _localizer = localizer;
+        _settings = settings.Value;
         _logger = logger;
     }
 
@@ -68,11 +77,12 @@ public sealed class ToolInvoker
         {
             if (allowedToolNames is null || !allowedToolNames.Contains(toolName))
             {
+                var notAllowedMessage = _localizer.Get(ChatTextKeys.ToolNotAllowed);
                 var notAllowed = new
                 {
                     Success = false,
                     Error = "TOOL_NOT_ALLOWED",
-                    Details = "Tool is not exposed in this pipeline."
+                    Details = notAllowedMessage
                 };
 
                 policy = EnvelopePolicyV1.Deny(_ctx.Context, "TOOL_NOT_ALLOWED");
@@ -81,7 +91,7 @@ public sealed class ToolInvoker
                     telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                     policy: policy,
                     code: "TOOL_NOT_ALLOWED",
-                    message: "Tool is not exposed in this pipeline.",
+                    message: notAllowedMessage,
                     details: notAllowed,
                     evidence: new[]
                     {
@@ -89,7 +99,7 @@ public sealed class ToolInvoker
                         {
                             Id = "tool_not_allowed",
                             Type = "error",
-                            Title = "Tool not exposed",
+                            Title = notAllowedMessage,
                             Payload = notAllowed
                         }
                     }), sw.ElapsedMilliseconds);
@@ -97,6 +107,7 @@ public sealed class ToolInvoker
 
             if (!_registry.IsWhitelisted(toolName))
             {
+                var notAllowedMessage = _localizer.Get(ChatTextKeys.ToolNotAllowed);
                 policy = EnvelopePolicyV1.Deny(_ctx.Context, "TOOL_NOT_ALLOWED");
                 _logger.LogInformation("ToolInvoker return req={RequestId} trace={TraceId} tool={Tool} ok=false code=TOOL_NOT_ALLOWED ms={Ms}", _ctx.Context?.RequestId, _ctx.Context?.TraceId, toolName, sw.ElapsedMilliseconds);
                 return LogAndReturn(
@@ -107,7 +118,7 @@ public sealed class ToolInvoker
                         telemetry: EnvelopeTelemetryV1.From(_ctx.Context, sw.ElapsedMilliseconds),
                         policy: policy,
                         code: "TOOL_NOT_ALLOWED",
-                        message: "Tool not allowed.",
+                        message: notAllowedMessage,
                         details: new { allowed = allowedToolNames.OrderBy(x => x).Take(20).ToArray() }
                     ),
                     sw.ElapsedMilliseconds);
@@ -228,7 +239,7 @@ public sealed class ToolInvoker
 
     private object LogAndReturn(EnvelopeV1 envelope, long durationMs)
     {
-        var compaction = ToolResultCompactor.CompactEnvelopeWithMetadata(envelope);
+        var compaction = ToolResultCompactor.CompactEnvelopeWithMetadata(envelope, ResolveMaxToolResultBytes());
         var datasetId = TryGetDatasetId(envelope.NormalizedIntent);
 
         _logger.LogInformation(
@@ -244,6 +255,14 @@ public sealed class ToolInvoker
             envelope.Meta.UserId);
 
         return envelope;
+    }
+
+    private int ResolveMaxToolResultBytes()
+    {
+        var maxBytes = _settings.Chat.MaxToolResultBytes;
+        if (maxBytes <= 0)
+            maxBytes = 16000;
+        return Math.Clamp(maxBytes, 1000, 200000);
     }
 
     private sealed record ToolFailure(string Code, string Message, object? Details);

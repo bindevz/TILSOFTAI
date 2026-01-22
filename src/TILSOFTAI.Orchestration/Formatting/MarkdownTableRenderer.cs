@@ -16,44 +16,42 @@ public sealed class MarkdownTableRenderOptions
 
 public sealed class MarkdownTableRenderer
 {
-    private static readonly IChatTextLocalizer Localizer = new DefaultChatTextLocalizer();
+    private static readonly IChatTextLocalizer Localizer = new ResxChatTextLocalizer();
 
     public static string Render(
         IReadOnlyList<string>? columns,
         IEnumerable<object?[]>? rows,
-        MarkdownTableRenderOptions? options = null,
-        ChatLanguage? language = null)
+        MarkdownTableRenderOptions? options = null)
     {
-        return RenderCore(columns, rows, totalCountOverride: null, options, language);
+        return RenderCore(columns, rows, totalCountOverride: null, options);
     }
 
-    public static string Render(TabularData table, MarkdownTableRenderOptions? options = null, ChatLanguage? language = null)
+    public static string Render(TabularData table, MarkdownTableRenderOptions? options = null)
     {
         if (table is null)
-            return RenderCore(Array.Empty<string>(), Array.Empty<object?[]>(), null, options, language);
+            return RenderCore(Array.Empty<string>(), Array.Empty<object?[]>(), null, options);
 
         var cols = table.Columns.Select(c => c.Name).ToList();
-        return RenderCore(cols, table.Rows, table.TotalCount, options, language);
+        return RenderCore(cols, table.Rows, table.TotalCount, options);
     }
 
-    public static string Render(AnalyticsSchema schema, IEnumerable<object?[]> rows, MarkdownTableRenderOptions? options = null, ChatLanguage? language = null)
+    public static string Render(AnalyticsSchema schema, IEnumerable<object?[]> rows, MarkdownTableRenderOptions? options = null)
     {
         if (schema is null)
-            return RenderCore(Array.Empty<string>(), rows, null, options, language);
+            return RenderCore(Array.Empty<string>(), rows, null, options);
 
         var cols = schema.Columns
             .Select(c => string.IsNullOrWhiteSpace(c.DisplayName) ? c.Name : c.DisplayName)
             .ToList();
 
-        return RenderCore(cols, rows, null, options, language);
+        return RenderCore(cols, rows, null, options);
     }
 
     private static string RenderCore(
         IReadOnlyList<string>? columns,
         IEnumerable<object?[]>? rows,
         int? totalCountOverride,
-        MarkdownTableRenderOptions? options,
-        ChatLanguage? language)
+        MarkdownTableRenderOptions? options)
     {
         options ??= new MarkdownTableRenderOptions();
 
@@ -108,13 +106,9 @@ public sealed class MarkdownTableRenderer
         if (totalRows > rowList.Count)
         {
             var noteTemplate = options.TruncationNoteTemplate;
-            if (string.IsNullOrWhiteSpace(noteTemplate))
-            {
-                var lang = language ?? ChatLanguage.En;
-                noteTemplate = Localizer.Get(ChatTextKeys.TableTruncationNote, lang);
-            }
-
-            var note = FormatTruncationNote(noteTemplate ?? string.Empty, rowList.Count, totalRows);
+            var note = string.IsNullOrWhiteSpace(noteTemplate)
+                ? Localizer.Get(ChatTextKeys.TableTruncationNote, rowList.Count, totalRows)
+                : FormatTruncationNote(noteTemplate, rowList.Count, totalRows);
             if (!string.IsNullOrWhiteSpace(note))
                 sb.AppendLine($"_{note}_");
         }
@@ -127,9 +121,14 @@ public sealed class MarkdownTableRenderer
         if (string.IsNullOrWhiteSpace(template))
             return string.Empty;
 
-        return template
-            .Replace("{shown}", shown.ToString(CultureInfo.InvariantCulture))
-            .Replace("{total}", total.ToString(CultureInfo.InvariantCulture));
+        try
+        {
+            return string.Format(CultureInfo.CurrentCulture, template, shown, total);
+        }
+        catch (FormatException)
+        {
+            return template;
+        }
     }
 
     private static List<string> BuildColumns(IReadOnlyList<string>? columns, List<object?[]> rowList, int maxCols)

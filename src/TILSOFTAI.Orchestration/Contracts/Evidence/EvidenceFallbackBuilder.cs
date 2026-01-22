@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 
 namespace TILSOFTAI.Orchestration.Contracts.Evidence;
 
@@ -137,6 +137,6 @@ public static class EvidenceFallbackBuilder
         if (s.Length <= maxLen)
             return s;
 
-        return s.Substring(0, maxLen) + "…";
-    }
-}
+        return s.Substring(0, maxLen) + "...";
+    }}
+

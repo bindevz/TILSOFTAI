@@ -2,8 +2,10 @@ using Microsoft.Data.Analysis;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 using TILSOFTAI.Analytics;
 using TILSOFTAI.Application.Analytics;
+using TILSOFTAI.Configuration;
 using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Domain.ValueObjects;
 
@@ -20,21 +22,21 @@ namespace TILSOFTAI.Application.Services;
 /// </summary>
 public sealed class AnalyticsService
 {
-    private static readonly TimeSpan DefaultDatasetTtl = TimeSpan.FromMinutes(10);
-
     private readonly IReadOnlyDictionary<string, IAnalyticsDataSource> _sources;
     private readonly IAnalyticsDatasetStore _datasetStore;
     private readonly IAuditLogger _auditLogger;
     private readonly AtomicDataEngine _engine;
     private readonly IAnalyticsResultCache? _resultCache;
+    private readonly TimeSpan _datasetTtl;
     private readonly TimeSpan _resultCacheTtl;
+    private readonly JoinKeyOptions _joinKeyOptions;
 
     public AnalyticsService(
         IEnumerable<IAnalyticsDataSource> sources,
         IAnalyticsDatasetStore datasetStore,
         IAuditLogger auditLogger,
         IAnalyticsResultCache? resultCache = null,
-        AnalyticsResultCacheOptions? resultCacheOptions = null)
+        IOptions<AppSettings>? settings = null)
     {
         _sources = (sources ?? throw new ArgumentNullException(nameof(sources)))
             .GroupBy(s => s.SourceName, StringComparer.OrdinalIgnoreCase)
@@ -43,7 +45,10 @@ public sealed class AnalyticsService
         _datasetStore = datasetStore;
         _auditLogger = auditLogger;
         _resultCache = resultCache;
-        _resultCacheTtl = ResolveResultCacheTtl(resultCacheOptions);
+        var appSettings = settings?.Value ?? new AppSettings();
+        _datasetTtl = ResolveDatasetTtl(appSettings.Redis);
+        _resultCacheTtl = ResolveResultCacheTtl(appSettings.Redis);
+        _joinKeyOptions = appSettings.AnalyticsEngine.JoinKeyOptions ?? new JoinKeyOptions();
         _engine = new AtomicDataEngine();
     }
 
@@ -72,7 +77,7 @@ public sealed class AnalyticsService
         var createdAtUtc = DateTimeOffset.UtcNow;
         var tabular = ToTabularData(df);
         var dataset = new AnalyticsDatasetDto(datasetId, schemaDigest, tabular, context.TenantId, context.UserId, createdAtUtc);
-        await _datasetStore.StoreAsync(datasetId, dataset, DefaultDatasetTtl, cancellationToken);
+        await _datasetStore.StoreAsync(datasetId, dataset, _datasetTtl, cancellationToken);
         var preview = BuildPreview(df, bounds.PreviewRows);
 
         var result = new DatasetCreateResult(
@@ -82,7 +87,7 @@ public sealed class AnalyticsService
             ColumnCount: df.Columns.Count,
             Schema: schema,
             Preview: preview,
-            ExpiresAtUtc: createdAtUtc.Add(DefaultDatasetTtl));
+            ExpiresAtUtc: createdAtUtc.Add(_datasetTtl));
 
         await _auditLogger.LogToolExecutionAsync(
             context,
@@ -128,7 +133,7 @@ public sealed class AnalyticsService
             UserId: context.UserId,
             CreatedAtUtc: createdAtUtc);
 
-        await _datasetStore.StoreAsync(datasetId, dataset, DefaultDatasetTtl, cancellationToken);
+        await _datasetStore.StoreAsync(datasetId, dataset, _datasetTtl, cancellationToken);
         var previewRows = bounds.PreviewRows <= 0 ? 0 : Math.Min(bounds.PreviewRows, tabular.Rows.Count);
         var preview = previewRows == 0 ? Array.Empty<object?[]>() : tabular.Rows.Take(previewRows).ToArray();
 
@@ -139,7 +144,7 @@ public sealed class AnalyticsService
             ColumnCount: tabular.Columns.Count,
             Schema: schema,
             Preview: preview,
-            ExpiresAtUtc: createdAtUtc.Add(DefaultDatasetTtl));
+            ExpiresAtUtc: createdAtUtc.Add(_datasetTtl));
 
         await _auditLogger.LogToolExecutionAsync(
             context,
@@ -346,7 +351,7 @@ public sealed class AnalyticsService
             bounds.MaxResultRows);
 
         var resolver = datasetResolver ?? (_ => null);
-        var engineResult = _engine.Execute(dataset, pipeline, engineBounds, resolver);
+        var engineResult = _engine.Execute(dataset, pipeline, engineBounds, resolver, _joinKeyOptions);
 
         resultFrame = engineResult.Data;
         var schema = DescribeSchema(resultFrame);
@@ -378,17 +383,26 @@ public sealed class AnalyticsService
             UserId: context.UserId,
             CreatedAtUtc: createdAtUtc);
 
-        await _datasetStore.StoreAsync(datasetId, dataset, DefaultDatasetTtl, cancellationToken);
+        await _datasetStore.StoreAsync(datasetId, dataset, _datasetTtl, cancellationToken);
         return datasetId;
     }
 
-    private static TimeSpan ResolveResultCacheTtl(AnalyticsResultCacheOptions? options)
+    private static TimeSpan ResolveDatasetTtl(RedisSettings settings)
     {
-        if (options is null || options.TtlMinutes <= 0)
+        var minutes = settings.DatasetTtlMinutes;
+        if (minutes <= 0)
             return TimeSpan.FromMinutes(10);
 
-        var minutes = Math.Clamp(options.TtlMinutes, 5, 10);
-        return TimeSpan.FromMinutes(minutes);
+        return TimeSpan.FromMinutes(Math.Clamp(minutes, 1, 1440));
+    }
+
+    private static TimeSpan ResolveResultCacheTtl(RedisSettings settings)
+    {
+        var minutes = settings.DatasetTtlMinutes;
+        if (minutes <= 0)
+            return TimeSpan.FromMinutes(10);
+
+        return TimeSpan.FromMinutes(Math.Clamp(minutes, 5, 120));
     }
 
     private static string BuildCacheKey(string datasetId, JsonElement pipeline, RunBounds bounds, string tenantId, string userId)

@@ -8,6 +8,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\\TILSOFTAI.Domain\\TILSOFTAI.Domain.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Data.Analysis" Version="0.22.0" />
   </ItemGroup>
 

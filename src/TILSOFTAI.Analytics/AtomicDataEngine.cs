@@ -1,6 +1,7 @@
 using Microsoft.Data.Analysis;
 using System.Globalization;
 using System.Text.Json;
+using TILSOFTAI.Configuration;
 
 namespace TILSOFTAI.Analytics;
 
@@ -18,19 +19,27 @@ namespace TILSOFTAI.Analytics;
 /// </summary>
 public sealed class AtomicDataEngine
 {
-    public EngineResult Execute(DataFrame dataset, JsonElement pipeline, EngineBounds bounds, Func<string, DataFrame?> datasetResolver)
+    public EngineResult Execute(
+        DataFrame dataset,
+        JsonElement pipeline,
+        EngineBounds bounds,
+        Func<string, DataFrame?> datasetResolver,
+        JoinKeyOptions? joinKeyOptions = null)
     {
         if (dataset is null) throw new ArgumentNullException(nameof(dataset));
         bounds = bounds.WithDefaults();
 
         var plan = AnalysisPipeline.Parse(pipeline);
         var warnings = new List<string>(plan.Warnings);
-        var result = AnalysisExecutor.Execute(dataset, plan, bounds, datasetResolver, warnings);
+        var keyOptions = joinKeyOptions ?? new JoinKeyOptions();
+        if (plan.Steps.Any(s => s is JoinStep))
+            AppendJoinKeyWarnings(keyOptions, warnings);
+        var result = AnalysisExecutor.Execute(dataset, plan, bounds, keyOptions, datasetResolver, warnings);
         return new EngineResult(result, warnings);
     }
 
     public EngineResult Execute(DataFrame dataset, JsonElement pipeline, EngineBounds bounds)
-        => Execute(dataset, pipeline, bounds, _ => null);
+        => Execute(dataset, pipeline, bounds, _ => null, null);
 
     public sealed record EngineBounds(int TopN, int MaxGroups, int MaxJoinRows, int MaxJoinMatchesPerLeft, int MaxColumns, int MaxResultRows)
     {
@@ -395,9 +404,32 @@ public sealed class AtomicDataEngine
         }
     }
 
+    private static void AppendJoinKeyWarnings(JoinKeyOptions options, List<string> warnings)
+    {
+        if (options.StringComparison == JoinKeyStringComparison.OrdinalIgnoreCase)
+            AddWarningOnce(warnings, "Join keys use OrdinalIgnoreCase string comparison (case-insensitive).");
+        if (options.NumericStringCoercion != NumericStringCoercion.None)
+            AddWarningOnce(warnings, $"Join keys coerce numeric strings (NumericStringCoercion={options.NumericStringCoercion}).");
+        if (options.DateNormalization != DateNormalization.None)
+            AddWarningOnce(warnings, $"Join keys normalize DateTime/DateTimeOffset (DateNormalization={options.DateNormalization}).");
+    }
+
+    private static void AddWarningOnce(List<string> warnings, string message)
+    {
+        if (warnings.Any(w => string.Equals(w, message, StringComparison.OrdinalIgnoreCase)))
+            return;
+        warnings.Add(message);
+    }
+
     internal static class AnalysisExecutor
     {
-        public static DataFrame Execute(DataFrame df, AnalysisPipeline pipeline, EngineBounds bounds, Func<string, DataFrame?> datasetResolver, List<string> warnings)
+        public static DataFrame Execute(
+            DataFrame df,
+            AnalysisPipeline pipeline,
+            EngineBounds bounds,
+            JoinKeyOptions joinKeyOptions,
+            Func<string, DataFrame?> datasetResolver,
+            List<string> warnings)
         {
             var current = df;
             foreach (var step in pipeline.Steps)
@@ -420,7 +452,7 @@ public sealed class AtomicDataEngine
                         current = ApplyTopN(current, Math.Min(t.N, bounds.TopN));
                         break;
                     case JoinStep j:
-                        current = ApplyJoin(current, j, bounds, datasetResolver, warnings);
+                        current = ApplyJoin(current, j, bounds, joinKeyOptions, datasetResolver, warnings);
                         break;
                     case DeriveStep d:
                         current = ApplyDerive(current, d);
@@ -685,9 +717,11 @@ public sealed class AtomicDataEngine
             DataFrame left,
             JoinStep step,
             EngineBounds bounds,
+            JoinKeyOptions joinKeyOptions,
             Func<string, DataFrame?> datasetResolver,
             List<string> warnings)
         {
+            AppendJoinKeyWarnings(joinKeyOptions, warnings);
             var right = datasetResolver(step.RightDatasetId);
             if (right is null)
                 throw new ArgumentException($"Join rightDatasetId '{step.RightDatasetId}' not found.");
@@ -717,7 +751,7 @@ public sealed class AtomicDataEngine
             }
 
             var maxIndexRows = (int)Math.Min(right.Rows.Count, bounds.MaxJoinRows);
-            var rightIndex = BuildRightIndex(right, rightKeyIndexes, maxIndexRows, bounds.MaxJoinMatchesPerLeft, warnings);
+            var rightIndex = BuildRightIndex(right, rightKeyIndexes, maxIndexRows, bounds.MaxJoinMatchesPerLeft, joinKeyOptions, warnings);
 
             var outRows = new List<object?[]>(capacity: Math.Min(bounds.MaxJoinRows, 1024));
             var truncatedMatches = false;
@@ -725,7 +759,7 @@ public sealed class AtomicDataEngine
 
             for (long li = 0; li < left.Rows.Count; li++)
             {
-                var key = BuildCompositeKey(left, leftKeyIndexes, li);
+                var key = BuildCompositeKey(left, leftKeyIndexes, li, joinKeyOptions);
                 if (rightIndex.TryGetValue(key, out var matches))
                 {
                     var added = 0;
@@ -1024,6 +1058,7 @@ public sealed class AtomicDataEngine
             int[] keyIndexes,
             int maxIndexRows,
             int maxMatchesPerKey,
+            JoinKeyOptions joinKeyOptions,
             List<string> warnings)
         {
             var index = new Dictionary<CompositeKey, List<long>>(CompositeKeyComparer.Instance);
@@ -1033,7 +1068,7 @@ public sealed class AtomicDataEngine
 
             for (long i = 0; i < cappedRows; i++)
             {
-                var key = BuildCompositeKey(right, keyIndexes, i);
+                var key = BuildCompositeKey(right, keyIndexes, i, joinKeyOptions);
                 if (!index.TryGetValue(key, out var list))
                 {
                     list = new List<long>();
@@ -1057,13 +1092,13 @@ public sealed class AtomicDataEngine
             return index;
         }
 
-        private static CompositeKey BuildCompositeKey(DataFrame df, int[] keyIndexes, long rowIndex)
+        private static CompositeKey BuildCompositeKey(DataFrame df, int[] keyIndexes, long rowIndex, JoinKeyOptions joinKeyOptions)
         {
             var parts = new CompositeKeyPart[keyIndexes.Length];
             for (var i = 0; i < keyIndexes.Length; i++)
             {
                 var v = df.Columns[keyIndexes[i]][rowIndex];
-                parts[i] = CompositeKeyPart.From(v);
+                parts[i] = CompositeKeyPart.From(v, joinKeyOptions);
             }
 
             return new CompositeKey(parts);
@@ -1088,7 +1123,7 @@ public sealed class AtomicDataEngine
             public bool BoolValue { get; }
             public string? TextValue { get; }
 
-            private CompositeKeyPart(CompositeKeyPartKind kind, decimal dec, double dbl, long lng, bool bl, string? text)
+            internal CompositeKeyPart(CompositeKeyPartKind kind, decimal dec, double dbl, long lng, bool bl, string? text)
             {
                 Kind = kind;
                 DecimalValue = dec;
@@ -1098,27 +1133,27 @@ public sealed class AtomicDataEngine
                 TextValue = text;
             }
 
-            public static CompositeKeyPart From(object? value)
+            public static CompositeKeyPart From(object? value, JoinKeyOptions joinKeyOptions)
             {
                 if (value is null)
                     return new CompositeKeyPart(CompositeKeyPartKind.Null, 0m, 0d, 0L, false, null);
 
                 if (value is string s)
                 {
-                    if (TryParseNumericString(s, out var numericPart))
+                    if (TryParseNumericString(s, joinKeyOptions.NumericStringCoercion, out var numericPart))
                         return numericPart;
 
-                    return new CompositeKeyPart(CompositeKeyPartKind.String, 0m, 0d, 0L, false, s);
+                    return new CompositeKeyPart(CompositeKeyPartKind.String, 0m, 0d, 0L, false, NormalizeStringKey(s, joinKeyOptions));
                 }
 
                 if (value is bool b)
                     return new CompositeKeyPart(CompositeKeyPartKind.Boolean, 0m, 0d, 0L, b, null);
 
                 if (value is DateTime dt)
-                    return new CompositeKeyPart(CompositeKeyPartKind.DateTime, 0m, 0d, NormalizeDateTicks(dt), false, null);
+                    return CreateDateKey(dt, joinKeyOptions);
 
                 if (value is DateTimeOffset dto)
-                    return new CompositeKeyPart(CompositeKeyPartKind.DateTime, 0m, 0d, dto.UtcTicks, false, null);
+                    return CreateDateKey(dto, joinKeyOptions);
 
                 if (TryNormalizeNumeric(value, out var numeric))
                     return numeric;
@@ -1126,10 +1161,10 @@ public sealed class AtomicDataEngine
                 if (value is IFormattable formattable)
                 {
                     var text = formattable.ToString(null, CultureInfo.InvariantCulture);
-                    return new CompositeKeyPart(CompositeKeyPartKind.String, 0m, 0d, 0L, false, text);
+                    return new CompositeKeyPart(CompositeKeyPartKind.String, 0m, 0d, 0L, false, NormalizeStringKey(text, joinKeyOptions));
                 }
 
-                return new CompositeKeyPart(CompositeKeyPartKind.String, 0m, 0d, 0L, false, value.ToString());
+                return new CompositeKeyPart(CompositeKeyPartKind.String, 0m, 0d, 0L, false, NormalizeStringKey(value.ToString(), joinKeyOptions));
             }
 
             public bool Equals(CompositeKeyPart other)
@@ -1144,7 +1179,7 @@ public sealed class AtomicDataEngine
                     CompositeKeyPartKind.NumericDouble => DoubleValue.Equals(other.DoubleValue),
                     CompositeKeyPartKind.DateTime => LongValue == other.LongValue,
                     CompositeKeyPartKind.Boolean => BoolValue == other.BoolValue,
-                    CompositeKeyPartKind.String => StringComparer.OrdinalIgnoreCase.Equals(TextValue ?? string.Empty, other.TextValue ?? string.Empty),
+                    CompositeKeyPartKind.String => StringComparer.Ordinal.Equals(TextValue ?? string.Empty, other.TextValue ?? string.Empty),
                     _ => false
                 };
             }
@@ -1171,7 +1206,7 @@ public sealed class AtomicDataEngine
                         hash.Add(BoolValue);
                         break;
                     case CompositeKeyPartKind.String:
-                        hash.Add(TextValue ?? string.Empty, StringComparer.OrdinalIgnoreCase);
+                        hash.Add(TextValue ?? string.Empty, StringComparer.Ordinal);
                         break;
                 }
                 return hash.ToHashCode();
@@ -1239,8 +1274,14 @@ public sealed class AtomicDataEngine
                 }
             }
 
-            private static bool TryParseNumericString(string input, out CompositeKeyPart part)
+            private static bool TryParseNumericString(string input, NumericStringCoercion coercion, out CompositeKeyPart part)
             {
+                if (coercion == NumericStringCoercion.None)
+                {
+                    part = default;
+                    return false;
+                }
+
                 if (decimal.TryParse(input, NumberStyles.Any, CultureInfo.InvariantCulture, out var dec))
                 {
                     part = new CompositeKeyPart(CompositeKeyPartKind.NumericDecimal, dec, 0d, 0L, false, null);
@@ -1257,15 +1298,42 @@ public sealed class AtomicDataEngine
                 return false;
             }
 
-            private static long NormalizeDateTicks(DateTime value)
-            {
-                if (value.Kind == DateTimeKind.Unspecified)
-                    value = DateTime.SpecifyKind(value, DateTimeKind.Utc);
-                else
-                    value = value.ToUniversalTime();
+        }
 
-                return value.Ticks;
-            }
+        private static long NormalizeDateTicks(DateTime value)
+        {
+            if (value.Kind == DateTimeKind.Unspecified)
+                value = DateTime.SpecifyKind(value, DateTimeKind.Utc);
+            else
+                value = value.ToUniversalTime();
+
+            return value.Ticks;
+        }
+
+        private static CompositeKeyPart CreateDateKey(DateTime value, JoinKeyOptions joinKeyOptions)
+        {
+            if (joinKeyOptions.DateNormalization == DateNormalization.UtcTicks)
+                return new CompositeKeyPart(CompositeKeyPartKind.DateTime, 0m, 0d, NormalizeDateTicks(value), false, null);
+
+            var text = value.ToString("O", CultureInfo.InvariantCulture);
+            return new CompositeKeyPart(CompositeKeyPartKind.String, 0m, 0d, 0L, false, NormalizeStringKey(text, joinKeyOptions));
+        }
+
+        private static CompositeKeyPart CreateDateKey(DateTimeOffset value, JoinKeyOptions joinKeyOptions)
+        {
+            if (joinKeyOptions.DateNormalization == DateNormalization.UtcTicks)
+                return new CompositeKeyPart(CompositeKeyPartKind.DateTime, 0m, 0d, value.UtcTicks, false, null);
+
+            var text = value.ToString("O", CultureInfo.InvariantCulture);
+            return new CompositeKeyPart(CompositeKeyPartKind.String, 0m, 0d, 0L, false, NormalizeStringKey(text, joinKeyOptions));
+        }
+
+        private static string NormalizeStringKey(string? value, JoinKeyOptions joinKeyOptions)
+        {
+            var text = value ?? string.Empty;
+            return joinKeyOptions.StringComparison == JoinKeyStringComparison.OrdinalIgnoreCase
+                ? text.ToUpperInvariant()
+                : text;
         }
 
         private readonly struct CompositeKey : IEquatable<CompositeKey>

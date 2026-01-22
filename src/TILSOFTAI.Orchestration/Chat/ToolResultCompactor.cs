@@ -12,6 +12,7 @@ public sealed class ToolResultCompactor
     private const int MaxDepth = 6;
     private const int MaxArrayElements = 20;
     private const int MaxStringLength = 500;
+    private const string TruncationWarning = "tool_result_truncated";
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
@@ -70,6 +71,8 @@ public sealed class ToolResultCompactor
             ["droppedFields"] = new JsonArray(droppedFields.Select(d => JsonValue.Create(d)).ToArray())
         };
         obj["compaction"] = compaction;
+        if (truncated)
+            AppendTruncationWarning(obj);
 
         var json = obj.ToJsonString(Json);
         if (GetByteCount(json) <= maxBytes)
@@ -88,6 +91,7 @@ public sealed class ToolResultCompactor
 
         compaction["truncated"] = true;
         compaction["droppedFields"] = new JsonArray(droppedFields.Select(d => JsonValue.Create(d)).ToArray());
+        AppendTruncationWarning(obj);
 
         json = obj.ToJsonString(Json);
         if (GetByteCount(json) <= maxBytes)
@@ -135,6 +139,10 @@ public sealed class ToolResultCompactor
             ["truncated"] = true,
             ["note"] = note
         };
+        if (string.Equals(note, "max_bytes", StringComparison.OrdinalIgnoreCase))
+        {
+            minimal["warnings"] = new JsonArray(TruncationWarning);
+        }
 
         if (source is not null)
         {
@@ -223,6 +231,93 @@ public sealed class ToolResultCompactor
         }
 
         return node.DeepClone();
+    }
+
+    private static void AppendTruncationWarning(JsonObject obj)
+    {
+        AppendWarning(obj, TruncationWarning);
+        AppendEvidenceWarning(obj, TruncationWarning);
+    }
+
+    private static void AppendWarning(JsonObject obj, string warning)
+    {
+        if (!obj.TryGetPropertyValue("warnings", out var warningsNode) || warningsNode is not JsonArray warnings)
+        {
+            warnings = new JsonArray();
+            obj["warnings"] = warnings;
+        }
+
+        foreach (var node in warnings)
+        {
+            if (node is JsonValue value && value.TryGetValue<string>(out var existing) &&
+                string.Equals(existing, warning, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+        }
+
+        warnings.Add(warning);
+    }
+
+    private static void AppendEvidenceWarning(JsonObject obj, string warning)
+    {
+        if (!obj.TryGetPropertyValue("evidence", out var evidenceNode) || evidenceNode is not JsonArray evidence)
+            return;
+
+        JsonObject? warningsItem = null;
+        foreach (var item in evidence)
+        {
+            if (item is not JsonObject itemObj)
+                continue;
+            if (!itemObj.TryGetPropertyValue("id", out var idNode) || idNode is not JsonValue idValue)
+                continue;
+            if (!idValue.TryGetValue<string>(out var id))
+                continue;
+            if (string.Equals(id, "warnings", StringComparison.OrdinalIgnoreCase))
+            {
+                warningsItem = itemObj;
+                break;
+            }
+        }
+
+        if (warningsItem is null)
+        {
+            warningsItem = new JsonObject
+            {
+                ["id"] = "warnings",
+                ["type"] = "metric",
+                ["title"] = "Warnings",
+                ["payload"] = new JsonObject
+                {
+                    ["warnings"] = new JsonArray(warning)
+                }
+            };
+            evidence.Add(warningsItem);
+            return;
+        }
+
+        if (!warningsItem.TryGetPropertyValue("payload", out var payloadNode) || payloadNode is not JsonObject payloadObj)
+        {
+            payloadObj = new JsonObject();
+            warningsItem["payload"] = payloadObj;
+        }
+
+        if (!payloadObj.TryGetPropertyValue("warnings", out var warnNode) || warnNode is not JsonArray warnArray)
+        {
+            warnArray = new JsonArray();
+            payloadObj["warnings"] = warnArray;
+        }
+
+        foreach (var node in warnArray)
+        {
+            if (node is JsonValue value && value.TryGetValue<string>(out var existing) &&
+                string.Equals(existing, warning, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+        }
+
+        warnArray.Add(warning);
     }
 
     private static string TruncateString(string input, int max)
