@@ -27,6 +27,15 @@ public sealed class AppSettings
 
     [Required]
     public LocalizationSettings Localization { get; init; } = new();
+
+    [Required]
+    public EntityGraphSettings EntityGraph { get; init; } = new();
+
+    [Required]
+    public EmbeddingsSettings Embeddings { get; init; } = new();
+
+    [Required]
+    public DocumentSearchSettings DocumentSearch { get; init; } = new();
 }
 
 public sealed class LlmSettings
@@ -113,6 +122,9 @@ public sealed class OrchestrationSettings
     [
         "atomic.catalog.search",
         "atomic.query.execute",
+        "atomic.graph.search",
+        "atomic.graph.get",
+        "atomic.doc.search",
         "analytics.run"
     ];
 
@@ -120,7 +132,39 @@ public sealed class OrchestrationSettings
     public StrictModeSettings StrictMode { get; init; } = new();
 
     [Required]
+    public ToolConfigurationValidationSettings ToolConfigurationValidation { get; init; } = new();
+
+    [Required]
     public AtomicQueryLimitsSettings AtomicQueryLimits { get; init; } = new();
+}
+
+public sealed class ToolConfigurationValidationSettings
+{
+    /// <summary>
+    /// Enables the startup tool configuration validator.
+    /// </summary>
+    public bool Enabled { get; init; } = true;
+
+    /// <summary>
+    /// If true, the application will fail startup when a validation error is detected.
+    /// If false, errors are logged and the application continues.
+    /// </summary>
+    public bool FailFast { get; init; } = true;
+
+    /// <summary>
+    /// Validates that every tool in Orchestration.ToolAllowlist has an RBAC mapping.
+    /// </summary>
+    public bool ValidateRbacMappings { get; init; } = true;
+
+    /// <summary>
+    /// Validates that every tool in Orchestration.ToolAllowlist is registered in ToolRegistry.
+    /// </summary>
+    public bool ValidateToolRegistry { get; init; } = true;
+
+    /// <summary>
+    /// Validates that every tool in Orchestration.ToolAllowlist has an input spec in ToolInputSpecCatalog.
+    /// </summary>
+    public bool ValidateToolInputSpecs { get; init; } = true;
 }
 
 public sealed class StrictModeSettings
@@ -212,4 +256,44 @@ public sealed class LocalizationSettings
     [Required]
     [MinLength(1)]
     public string[] SupportedCultures { get; init; } = ["en", "vi"];
+}
+
+public sealed class EntityGraphSettings
+{
+    public bool Enabled { get; init; } = true;
+
+    [Required]
+    public string SearchSpName { get; init; } = "dbo.TILSOFTAI_sp_EntityGraph_Search";
+
+    [Required]
+    public string GetSpName { get; init; } = "dbo.TILSOFTAI_sp_EntityGraph_Get";
+}
+
+
+public sealed class EmbeddingsSettings
+{
+    public bool Enabled { get; init; } = true;
+
+    [Required]
+    public string Endpoint { get; init; } = string.Empty;
+
+    [Required]
+    public string Model { get; init; } = "text-embedding-3-small";
+
+    [Range(1, 3600)]
+    public int TimeoutSeconds { get; init; } = 120;
+
+    [Range(1, 8192)]
+    public int Dimensions { get; init; } = 1536;
+}
+
+public sealed class DocumentSearchSettings
+{
+    public bool Enabled { get; init; } = true;
+
+    [Required]
+    public string SearchSpName { get; init; } = "dbo.TILSOFTAI_sp_DocChunk_Search";
+
+    [Range(1, 50)]
+    public int MaxTopK { get; init; } = 8;
 }

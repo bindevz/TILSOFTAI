@@ -7,9 +7,11 @@ using TILSOFTAI.Api.DependencyInjection;
 using TILSOFTAI.Api.Localization;
 using TILSOFTAI.Api.Middleware;
 using TILSOFTAI.Configuration;
+using TILSOFTAI.Domain.Interfaces;
 using TILSOFTAI.Orchestration.Chat;
 using TILSOFTAI.Orchestration.Chat.Localization;
 using TILSOFTAI.Orchestration.Llm.OpenAi;
+using TILSOFTAI.Orchestration;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Configuration.AddEnvironmentVariables();
@@ -92,10 +94,18 @@ builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolSchemas.DynamicI
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.IToolRegistrationProvider, TILSOFTAI.Orchestration.Modules.Analytics.AnalyticsToolRegistrationProvider>();
 builder.Services.AddSingleton<TILSOFTAI.Orchestration.Tools.ToolRegistry>();
 
+// Startup validation: fail fast if a tool is allowlisted but missing RBAC, registry registration, or input spec.
+builder.Services.AddHostedService<TILSOFTAI.Api.Validation.ToolConfigurationValidatorHostedService>();
+
 // Handlers
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler, TILSOFTAI.Orchestration.Modules.Analytics.Handlers.AnalyticsRunToolHandler>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler, TILSOFTAI.Orchestration.Modules.Analytics.Handlers.AtomicQueryExecuteToolHandler>();
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.Modularity.IToolHandler, TILSOFTAI.Orchestration.Modules.Analytics.Handlers.AtomicCatalogSearchToolHandler>();
+
+// Entity Graph
+builder.Services.AddEntityGraphOrchestration();
+// Document Search (Vector RAG)
+builder.Services.AddDocumentSearchOrchestration();
 
 builder.Services.AddScoped<TILSOFTAI.Orchestration.Tools.ToolDispatcher>();
 
@@ -117,6 +127,17 @@ builder.Services.AddHttpClient<OpenAiChatClient>((sp, http) =>
     http.Timeout = TimeSpan.FromSeconds(Math.Clamp(lm.TimeoutSeconds, 5, 1800));
     http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "lm-studio");
 });
+
+builder.Services.AddHttpClient<OpenAiEmbeddingsClient>((sp, http) =>
+{
+    var emb = sp.GetRequiredService<IOptions<AppSettings>>().Value.Embeddings;
+    http.BaseAddress = new Uri(emb.Endpoint.TrimEnd('/') + "/v1/");
+    http.Timeout = TimeSpan.FromSeconds(Math.Clamp(emb.TimeoutSeconds, 5, 3600));
+    http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "lm-studio");
+});
+
+builder.Services.AddScoped<IEmbeddingClient>(sp => sp.GetRequiredService<OpenAiEmbeddingsClient>());
+
 
 builder.Services.AddSingleton<OpenAiToolSchemaFactory>();
 

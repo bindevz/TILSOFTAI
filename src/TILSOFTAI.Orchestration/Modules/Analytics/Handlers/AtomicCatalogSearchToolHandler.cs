@@ -79,6 +79,22 @@ public sealed class AtomicCatalogSearchToolHandler : IToolHandler
             score = Math.Round((double)h.Score, 4),
             domain = h.Domain,
             entity = h.Entity,
+            // IMPORTANT: ChatPipeline compacts tool envelopes by dropping envelope.data.
+            // Therefore, all contract-critical fields MUST be present in envelope.evidence.
+            parameters = AtomicCatalogService.ParseParamSpecs(h.ParamsJson)
+                .Select(p => new
+                {
+                    name = p.Name,
+                    sqlType = p.SqlType,
+                    required = p.Required,
+                    hasDefault = p.HasDefault,
+                    @default = p.DefaultValue,
+                    example = p.Example,
+                    description_vi = p.DescriptionVi,
+                    description_en = p.DescriptionEn
+                })
+                .ToArray(),
+            example = ToBoundedJsonOrString(h.ExampleJson, maxStringLength: 1200),
             schemaHints = ToBoundedJsonOrString(h.SchemaHintsJson, maxStringLength: 1000)
         });
 
@@ -88,6 +104,19 @@ public sealed class AtomicCatalogSearchToolHandler : IToolHandler
             Type = "list",
             Title = "Catalog hits",
             Payload = new { query, topK, results = compactHits }
+        });
+
+        // Additional deterministic guidance (kept in evidence because envelope.data is compacted away).
+        evidence.Add(new EnvelopeEvidenceItemV1
+        {
+            Id = "catalog_contract",
+            Type = "kv",
+            Title = "Contract guidance",
+            Payload = new
+            {
+                rule = "When calling atomic.query.execute, ONLY use parameter names declared in catalog_hits.results[].parameters[].name. Do NOT invent keys or use output column names from result sets.",
+                note = "If you need domain packs + filter-aware procedures, prefer atomic.graph.search -> atomic.graph.get first."
+            }
         });
 
         var extras = new ToolDispatchExtras(

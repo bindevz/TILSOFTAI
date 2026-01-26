@@ -360,6 +360,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
         var schemaDigest = new
         {
+            meta = new { graphCode = schemaHints.GraphCode, packCode = schemaHints.PackCode },
             tables = schemaDigestTables
         };
 
@@ -547,7 +548,9 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
 
     private sealed record SchemaHints(
         IReadOnlyDictionary<string, SchemaHintsTable> Tables,
-        IReadOnlyDictionary<int, SchemaHintsResultSet> ResultSets);
+        IReadOnlyDictionary<int, SchemaHintsResultSet> ResultSets,
+        string? GraphCode,
+        string? PackCode);
 
     private sealed record ResultSetMetadata(
         int Index,
@@ -561,14 +564,20 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
         var tables = new Dictionary<string, SchemaHintsTable>(StringComparer.OrdinalIgnoreCase);
         var resultSets = new Dictionary<int, SchemaHintsResultSet>();
         if (string.IsNullOrWhiteSpace(schemaHintsJson))
-            return new SchemaHints(tables, resultSets);
+            return new SchemaHints(tables, resultSets, null, null);
+
+        string? graphCode = null;
+        string? packCode = null;
 
         try
         {
             using var doc = JsonDocument.Parse(schemaHintsJson);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
-                return new SchemaHints(tables, resultSets);
+                return new SchemaHints(tables, resultSets, null, null);
+
+            graphCode = GetString(root, "graphCode");
+            packCode = GetString(root, "packCode");
 
             if (root.TryGetProperty("tables", out var tablesEl) && tablesEl.ValueKind == JsonValueKind.Array)
             {
@@ -619,7 +628,7 @@ public sealed class AtomicQueryExecuteToolHandler : IToolHandler
             // Ignore schema hints parse errors.
         }
 
-        return new SchemaHints(tables, resultSets);
+        return new SchemaHints(tables, resultSets, graphCode, packCode);
     }
 
     private static IReadOnlyList<SchemaHintsForeignKey> ReadForeignKeys(JsonElement table)

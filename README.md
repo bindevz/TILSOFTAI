@@ -122,6 +122,16 @@ A request-scoped context stores **client artifacts** and **recent evidence** wit
 **Client artifact**
 - `LastInsightPreviewMarkdown`
 
+### 3.4 Tool: `atomic.graph.search` / `atomic.graph.get`
+**Purpose**
+- `atomic.graph.search`: Fuzzy search for Entity Graphs (domain/entity definitions).
+- `atomic.graph.get`: Retrieve full definition of a graph (Packs, Nodes, Edges).
+
+**Flow**
+1. Search for graph ("sales stats") -> returns hits (GraphCode="Sales.Stats")
+2. Get graph ("Sales.Stats") -> returns packs (stored procedures) and nodes (tables).
+3. Use root pack SP in `atomic.query.execute`.
+
 ---
 
 ## 4) Contracts and Envelopes
@@ -404,3 +414,22 @@ The LLM must **not** output tables directly.
 - **DatasetId**: server-side handle to a cached engine dataset (Redis/InMemory).
 - **Evidence**: bounded tool output used by the LLM to reason (never raw large rows).
 - **Mode B**: manual tool loop orchestrated by server; model iterates tool calls until ready.
+
+---
+
+## 16) Entity Graph Concepts & Onboarding
+
+### 16.1 Concept
+An **Entity Graph** groups related Stored Procedures (Packs) and Datasets (Nodes) into a coherent business domain unit.
+- **Pack**: A stored procedure that returns data. "Root Pack" is the entry point. "Drill-down Packs" provide details.
+- **Node**: A dataset (table) returned by a Pack.
+- **Edge**: Join relationship between Nodes.
+
+### 16.2 Onboarding a New Domain
+1. **Define Graph**: Create row in `TILSOFTAI_EntityGraphCatalog`.
+2. **Define Packs**: Add SPs to `TILSOFTAI_EntityGraphPack`.
+   - Mark one as "Root".
+   - Define params and expected datasets.
+3. **Define Nodes**: Describe datasets in `TILSOFTAI_EntityGraphNode`.
+4. **Define Edges**: Describe joins in `TILSOFTAI_EntityGraphEdge`.
+5. **Verify**: Use `atomic.graph.get` to validate structure.

@@ -13,7 +13,12 @@ public sealed class RbacService
         // Analytics / Atomic
         ["analytics.run"] = ReadRoles,
         ["atomic.catalog.search"] = ReadRoles,
-        ["atomic.query.execute"] = ReadRoles
+        ["atomic.query.execute"] = ReadRoles,
+
+        // Entity Graph + Document Search
+        ["atomic.graph.search"] = ReadRoles,
+        ["atomic.graph.get"] = ReadRoles,
+        ["atomic.doc.search"] = ReadRoles
     };
 
     public void EnsureReadAllowed(string toolName, TSExecutionContext context)
@@ -30,4 +35,11 @@ public sealed class RbacService
         if (!WriteRoles.Any(context.IsInRole) || !roles.Any(context.IsInRole))
             throw new SecurityException($"Tool {toolName} not permitted for user.");
     }
+
+    /// <summary>
+    /// Returns true if the tool has an explicit RBAC mapping.
+    /// This is used by startup validation to fail fast on misconfiguration.
+    /// </summary>
+    public bool IsToolConfigured(string toolName)
+        => ToolRoles.ContainsKey(toolName);
 }
