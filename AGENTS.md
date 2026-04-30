@@ -27,13 +27,13 @@ You are implementing TILSOFTAI, an enterprise-grade ERP AI Data Orchestration Fr
 
 ## Coding Standards
 
-- Prefer clean architecture boundaries.
-- Keep domain logic out of controllers.
-- Keep SQL execution out of agents.
-- Keep prompts versioned.
-- Keep tool definitions declarative.
-- Keep sensitive values out of logs.
-- Redact user question content if marked sensitive.
+* Prefer clean architecture boundaries.
+* Keep domain logic out of controllers.
+* Keep SQL execution out of agents.
+* Keep prompts versioned.
+* Keep tool definitions declarative.
+* Keep sensitive values out of logs.
+* Redact user question content if marked sensitive.
 
 ## Completion Criteria
 
@@ -50,3 +50,17 @@ The MVP is complete only when an API request can:
 9. Return answer, table, insight, provenance, and follow-up.
 10. Pass automated tests.
 
+
+
+## Sprint 01 Production Rules
+
+- In-memory services are allowed only in Testing environment or test projects.
+- Production services must be SQL-backed and local-AI-backed.
+- Tool stored procedure names must come from `ai.Tool` metadata.
+- Every Model tool execution must pass `TenantId`, `UserId`, and `CorrelationId` to SQL.
+- Do not default missing `projectCode` to `MODEL-001`.
+- Missing business parameters must return `NeedsClarification`.
+- Deterministic AI clients are test-only.
+- Final answers must be grounded in persisted sanitized artifacts and provenance.
+- User ID headers are trusted only in local testing or trusted-gateway deployment mode.
+- Do not log secrets, raw artifact contents, or sensitive prompts.

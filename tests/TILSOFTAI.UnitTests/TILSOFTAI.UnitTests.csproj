@@ -8,8 +8,11 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="..\..\src\TILSOFTAI.Application\**\*.cs" Exclude="..\..\src\TILSOFTAI.Application\bin\**;..\..\src\TILSOFTAI.Application\obj\**" LinkBase="Application" />
-    <Compile Include="..\..\src\TILSOFTAI.Contracts\**\*.cs" Exclude="..\..\src\TILSOFTAI.Contracts\bin\**;..\..\src\TILSOFTAI.Contracts\obj\**" LinkBase="Contracts" />
+    <ProjectReference Include="..\..\src\TILSOFTAI.Agent\TILSOFTAI.Agent.csproj" />
+    <ProjectReference Include="..\..\src\TILSOFTAI.Application\TILSOFTAI.Application.csproj" />
+    <ProjectReference Include="..\..\src\TILSOFTAI.Contracts\TILSOFTAI.Contracts.csproj" />
+    <ProjectReference Include="..\..\src\TILSOFTAI.Infrastructure\TILSOFTAI.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\TILSOFTAI.Persistence\TILSOFTAI.Persistence.csproj" />
   </ItemGroup>
 
 </Project>

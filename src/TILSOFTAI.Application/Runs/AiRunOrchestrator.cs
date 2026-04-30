@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using TILSOFTAI.Application.Abstractions;
 using TILSOFTAI.Application.ContextPackaging;
+using TILSOFTAI.Application.Security;
 using TILSOFTAI.Contracts.Api;
 using TILSOFTAI.Contracts.Common;
 using TILSOFTAI.Contracts.Tools;
@@ -10,72 +11,98 @@ namespace TILSOFTAI.Application.Runs;
 
 public sealed class AiRunOrchestrator(
     ICapabilitySearchService capabilitySearch,
+    IAgentBrain agentBrain,
     IToolRuntime toolRuntime,
-    IArtifactStore artifactStore,
+    IArtifactContentStore artifactContentStore,
+    IArtifactRepository artifactRepository,
     ILocalAiClient aiClient,
-    IAiRunRepository repository)
+    IAiRunRepository runRepository,
+    FinalAnswerProvenanceValidator provenanceValidator)
 {
     public async Task<AiRunResponse> CreateRunAsync(RequestContext context, CreateAiRunRequest request, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(request.Question))
             throw new ArgumentException("Question is required.", nameof(request));
 
-        RunState run = new()
+        Guid runId = Guid.NewGuid();
+        await runRepository.CreateRunAsync(context, new RunCreateRequest(runId, request.Question, request.Language, request.DomainHint), cancellationToken);
+
+        try
         {
-            TenantId = context.TenantId,
-            UserId = context.UserId,
-            RunId = Guid.NewGuid(),
-            Question = request.Question,
-            Status = "Running"
-        };
-
         IReadOnlyList<CapabilityDescriptor> candidates = await capabilitySearch.SearchAsync(context, request.Question, request.DomainHint, cancellationToken);
-        CapabilityDescriptor selected = candidates.FirstOrDefault() ?? throw new InvalidOperationException("No allowed Model capability matched the question.");
-        run.SelectedCapability = selected.CapabilityCode;
+        if (candidates.Count == 0)
+        {
+            FinalAnswer answer = StatusAnswer("No Model capability matched the question.", "NoCapabilityFound");
+            await runRepository.UpdateRunStatusAsync(context, new RunStatusUpdate(runId, "NoCapabilityFound", null, "NoCapabilityFound", "No registered Model capability matched."), cancellationToken);
+            await runRepository.SaveFinalAnswerAsync(context, runId, answer, cancellationToken);
+            return new AiRunResponse(runId, "NoCapabilityFound", answer, [], context.RequestTimeUtc);
+        }
 
-        string projectCode = ExtractProjectCode(request.Question);
-        JsonObject parameters = new() { ["projectCode"] = projectCode };
-        ToolExecutionResult toolResult = await toolRuntime.ExecuteAsync(context, new ToolExecutionRequest(selected.Tool, parameters), cancellationToken);
-        run.ToolCalls.Add(new ToolCallSummary(toolResult.ToolName, "Completed", toolResult.Rows.Count, (long)toolResult.Elapsed.TotalMilliseconds));
+        AgentPlan plan = await agentBrain.PlanAsync(context, new AgentPlanningInput(request.Question, request.DomainHint, candidates), cancellationToken);
+        if (plan.NeedsClarification || plan.SelectedCapability is null)
+        {
+            FinalAnswer answer = StatusAnswer(plan.Message ?? "More information is required.", "NeedsClarification");
+            await runRepository.UpdateRunStatusAsync(context, new RunStatusUpdate(runId, "NeedsClarification", plan.SelectedCapability?.CapabilityCode, "NeedsClarification", plan.Message), cancellationToken);
+            await runRepository.SaveFinalAnswerAsync(context, runId, answer, cancellationToken);
+            return new AiRunResponse(runId, "NeedsClarification", answer, [], context.RequestTimeUtc);
+        }
 
-        string rawJson = JsonSerializer.Serialize(toolResult.Rows);
-        ArtifactWriteResult raw = await artifactStore.WriteAsync(context, new ArtifactWriteRequest(run.RunId, "RawResult", "application/json", rawJson), cancellationToken);
-        run.Artifacts.Add(raw.Metadata);
+        await runRepository.UpdateRunStatusAsync(context, new RunStatusUpdate(runId, "Running", plan.SelectedCapability.CapabilityCode), cancellationToken);
+        ToolExecutionResult toolResult = await toolRuntime.ExecuteAsync(context, new ToolExecutionRequest(plan.SelectedCapability.Tool, plan.Parameters), cancellationToken);
+        await runRepository.RecordToolCallAsync(context, new ToolCallRecord(Guid.NewGuid(), runId, toolResult.ToolName, plan.Parameters, "Completed", toolResult.Rows.Count, (long)toolResult.Elapsed.TotalMilliseconds), cancellationToken);
 
-        IReadOnlyList<IReadOnlyDictionary<string, object?>> sanitized = SanitizerAndContextPackager.Sanitize(toolResult);
-        string sanitizedJson = JsonSerializer.Serialize(sanitized);
-        ArtifactWriteResult sanitizedArtifact = await artifactStore.WriteAsync(context, new ArtifactWriteRequest(run.RunId, "SanitizedResult", "application/json", sanitizedJson), cancellationToken);
-        run.Artifacts.Add(sanitizedArtifact.Metadata);
+        ArtifactMetadataResponse rawArtifact = await PersistArtifactAsync(context, runId, "RawResult", JsonSerializer.Serialize(toolResult.Rows), cancellationToken);
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> sanitizedRows = SanitizerAndContextPackager.Sanitize(toolResult);
+        ArtifactMetadataResponse sanitizedArtifact = await PersistArtifactAsync(context, runId, "SanitizedResult", JsonSerializer.Serialize(sanitizedRows), cancellationToken);
+        await artifactRepository.CreateProvenanceAsync(context, new ProvenanceCreateRequest(runId, toolResult.ToolName, toolResult.Filters, sanitizedArtifact.ArtifactId), cancellationToken);
 
         JsonObject contextPackage = SanitizerAndContextPackager.Build(request.Question, toolResult, sanitizedArtifact.ArtifactId);
-        ArtifactWriteResult packageArtifact = await artifactStore.WriteAsync(context, new ArtifactWriteRequest(run.RunId, "ContextPackage", "application/json", contextPackage.ToJsonString()), cancellationToken);
-        run.Artifacts.Add(packageArtifact.Metadata);
+        ArtifactMetadataResponse contextArtifact = await PersistArtifactAsync(context, runId, "ContextPackage", contextPackage.ToJsonString(), cancellationToken);
 
-        AiChatResponse response = await aiClient.ChatAsync(new AiChatRequest("system-answer-generation.v1", request.Question, contextPackage), cancellationToken);
-        run.Answer = response.Answer;
-        run.Status = "Completed";
-        await repository.SaveAsync(run, cancellationToken);
+        AiChatResponse aiResponse = await aiClient.ChatAsync(new AiChatRequest("system-answer-generation.v1", request.Question, contextPackage), cancellationToken);
+        FinalAnswer finalAnswer = provenanceValidator.ValidateAndAttachSystemProvenance(aiResponse.Answer, toolResult, sanitizedArtifact.ArtifactId);
+        ArtifactMetadataResponse finalAnswerArtifact = await PersistArtifactAsync(context, runId, "FinalAnswer", JsonSerializer.Serialize(finalAnswer), cancellationToken);
 
-        return new AiRunResponse(run.RunId, run.Status, run.Answer, run.Artifacts.Select(a => a.ArtifactId).ToList(), run.CreatedAtUtc);
+        await runRepository.SaveFinalAnswerAsync(context, runId, finalAnswer, cancellationToken);
+        await runRepository.UpdateRunStatusAsync(context, new RunStatusUpdate(runId, "Completed", plan.SelectedCapability.CapabilityCode), cancellationToken);
+
+        return new AiRunResponse(runId, "Completed", finalAnswer, [rawArtifact.ArtifactId, sanitizedArtifact.ArtifactId, contextArtifact.ArtifactId, finalAnswerArtifact.ArtifactId], context.RequestTimeUtc);
+        }
+        catch (Exception ex) when (ex is PermissionDeniedException or UnauthorizedAccessException)
+        {
+            FinalAnswer answer = StatusAnswer("The requesting user is not authorized to execute this Model capability.", "Forbidden");
+            await runRepository.UpdateRunStatusAsync(context, new RunStatusUpdate(runId, "Forbidden", null, "Forbidden", "Permission denied."), cancellationToken);
+            await runRepository.SaveFinalAnswerAsync(context, runId, answer, cancellationToken);
+            return new AiRunResponse(runId, "Forbidden", answer, [], context.RequestTimeUtc);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            FinalAnswer answer = StatusAnswer("The Model run could not be completed safely.", "Failed");
+            await runRepository.UpdateRunStatusAsync(context, new RunStatusUpdate(runId, "Failed", null, "Failed", ex.Message), cancellationToken);
+            await runRepository.SaveFinalAnswerAsync(context, runId, answer, cancellationToken);
+            return new AiRunResponse(runId, "Failed", answer, [], context.RequestTimeUtc);
+        }
     }
 
     public async Task<RunDetailsResponse?> GetRunAsync(RequestContext context, Guid runId, CancellationToken cancellationToken)
     {
-        RunState? run = await repository.GetAsync(context.TenantId, runId, cancellationToken);
-        if (run is null || run.UserId != context.UserId)
+        RunState? run = await runRepository.GetAsync(context, runId, cancellationToken);
+        if (run is null)
             return null;
 
-        return new RunDetailsResponse(run.RunId, run.Status, run.SelectedCapability, run.ToolCalls, run.Artifacts, run.Answer!, run.CreatedAtUtc);
+        return new RunDetailsResponse(run.RunId, run.Status, run.SelectedCapability, run.ToolCalls, run.Artifacts, run.Answer ?? StatusAnswer("Final answer is not available.", "Unavailable"), run.CreatedAtUtc);
     }
 
     public Task<ArtifactMetadataResponse?> GetArtifactMetadataAsync(RequestContext context, Guid artifactId, CancellationToken cancellationToken) =>
-        repository.GetArtifactAsync(context.TenantId, artifactId, cancellationToken);
+        artifactRepository.GetAsync(context, artifactId, cancellationToken);
 
-    public static string ExtractProjectCode(string question)
+    private async Task<ArtifactMetadataResponse> PersistArtifactAsync(RequestContext context, Guid runId, string artifactType, string json, CancellationToken cancellationToken)
     {
-        string token = question.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .FirstOrDefault(part => part.StartsWith("MODEL-", StringComparison.OrdinalIgnoreCase)) ?? "MODEL-001";
-        return token.TrimEnd('.', '?', ',', ';', ':').ToUpperInvariant();
+        Guid artifactId = Guid.NewGuid();
+        ArtifactContentWriteResult content = await artifactContentStore.WriteAsync(context, new ArtifactContentWriteRequest(runId, artifactId, artifactType, json), cancellationToken);
+        return await artifactRepository.CreateAsync(context, new ArtifactMetadataCreateRequest(artifactId, runId, artifactType, "application/json", content.Path, content.Sha256, content.SizeBytes), cancellationToken);
     }
-}
 
+    private static FinalAnswer StatusAnswer(string summary, string caveat) =>
+        new(summary, [], [], [caveat], [], []);
+}

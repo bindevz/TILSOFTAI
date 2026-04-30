@@ -8,11 +8,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="..\..\src\TILSOFTAI.Agent\AgentOrchestrator\**\*.cs" Exclude="..\..\src\TILSOFTAI.Agent\bin\**;..\..\src\TILSOFTAI.Agent\obj\**" LinkBase="Agent\AgentOrchestrator" />
-    <Compile Include="..\..\src\TILSOFTAI.Application\Abstractions\IRequestContextAccessor.cs" LinkBase="Application\Abstractions" />
-    <Compile Include="..\..\src\TILSOFTAI.Application\Abstractions\FrameworkAbstractions.cs" LinkBase="Application\Abstractions" />
-    <Compile Include="..\..\src\TILSOFTAI.Application\Capabilities\InMemoryCapabilitySearchService.cs" LinkBase="Application\Capabilities" />
-    <Compile Include="..\..\src\TILSOFTAI.Contracts\**\*.cs" Exclude="..\..\src\TILSOFTAI.Contracts\bin\**;..\..\src\TILSOFTAI.Contracts\obj\**" LinkBase="Contracts" />
+    <ProjectReference Include="..\..\src\TILSOFTAI.Agent\TILSOFTAI.Agent.csproj" />
+    <ProjectReference Include="..\..\src\TILSOFTAI.Application\TILSOFTAI.Application.csproj" />
+    <ProjectReference Include="..\..\src\TILSOFTAI.Contracts\TILSOFTAI.Contracts.csproj" />
   </ItemGroup>
 
 </Project>

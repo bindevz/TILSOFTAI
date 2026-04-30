@@ -2,9 +2,9 @@ using TILSOFTAI.Application.Abstractions;
 using TILSOFTAI.Contracts.Common;
 using TILSOFTAI.Contracts.Tools;
 
-namespace TILSOFTAI.Application.Capabilities;
+namespace TILSOFTAI.Application.Testing;
 
-public sealed class InMemoryCapabilitySearchService : ICapabilitySearchService
+public sealed class TestingCapabilitySearchService : ICapabilitySearchService
 {
     private static readonly Guid VerifyCapabilityId = Guid.Parse("10000000-0000-0000-0000-000000000001");
     private static readonly Guid LatestCapabilityId = Guid.Parse("10000000-0000-0000-0000-000000000002");

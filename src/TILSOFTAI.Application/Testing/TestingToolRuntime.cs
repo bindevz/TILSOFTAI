@@ -4,16 +4,14 @@ using TILSOFTAI.Application.Abstractions;
 using TILSOFTAI.Contracts.Common;
 using TILSOFTAI.Contracts.Tools;
 
-namespace TILSOFTAI.Application.Tools;
+namespace TILSOFTAI.Application.Testing;
 
-public sealed class ModelToolRuntime : IToolRuntime
+public sealed class TestingToolRuntime : IToolRuntime
 {
-    private static readonly Guid AuthorizedUserId = Guid.Parse("00000000-0000-0000-0000-000000000101");
-
     public Task<ToolExecutionResult> ExecuteAsync(RequestContext context, ToolExecutionRequest request, CancellationToken cancellationToken)
     {
-        if (context.UserId != AuthorizedUserId)
-            throw new UnauthorizedAccessException("User lacks model.project.run.read permission.");
+        if (context.UserId.ToString("D").EndsWith("102", StringComparison.Ordinal))
+            throw new UnauthorizedAccessException("Testing user lacks model.project.run.read permission.");
 
         string? projectCode = request.Parameters["projectCode"]?.GetValue<string>();
         if (string.IsNullOrWhiteSpace(projectCode) || !projectCode.StartsWith("MODEL-", StringComparison.OrdinalIgnoreCase))
@@ -55,7 +53,8 @@ public sealed class ModelToolRuntime : IToolRuntime
 
     private static IReadOnlyList<IReadOnlyDictionary<string, object?>> FailedRows(string projectCode) =>
     [
-        Row(projectCode, "Failed Checks", "0", false)
+        Row(projectCode, "Failed Checks", projectCode.EndsWith("002", StringComparison.Ordinal) ? "1" : "0", false),
+        Row(projectCode, "SensitiveEvidence", "secret-review-note", true)
     ];
 
     private static Dictionary<string, object?> Row(string projectCode, string metric, string value, bool sensitive) =>
@@ -67,4 +66,3 @@ public sealed class ModelToolRuntime : IToolRuntime
             ["IsSensitive"] = sensitive
         };
 }
-

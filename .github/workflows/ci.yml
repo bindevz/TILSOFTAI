@@ -13,12 +13,15 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - name: Build
-        run: dotnet build TILSOFTAI.sln --configuration Release /p:RestoreConfigFile=NuGet.Config
+        run: dotnet build TILSOFTAI.sln --configuration Release
       - name: Test
-        run: dotnet test TILSOFTAI.sln --configuration Release --no-build /p:RestoreConfigFile=NuGet.Config
+        run: dotnet test TILSOFTAI.sln --configuration Release --no-build
       - name: Acceptance suites
         run: |
           dotnet run --project tests/TILSOFTAI.UnitTests/TILSOFTAI.UnitTests.csproj --configuration Release --no-build
           dotnet run --project tests/TILSOFTAI.IntegrationTests/TILSOFTAI.IntegrationTests.csproj --configuration Release --no-build
           dotnet run --project tests/TILSOFTAI.AgentTests/TILSOFTAI.AgentTests.csproj --configuration Release --no-build
           dotnet run --project tests/TILSOFTAI.SqlTests/TILSOFTAI.SqlTests.csproj --configuration Release --no-build
+      - name: Live SQL and AI E2E
+        if: ${{ env.ConnectionStrings__TilsoftAi != '' && env.Ai__OpenAICompatible__BaseUrl != '' }}
+        run: dotnet test TILSOFTAI.sln --configuration Release --no-build

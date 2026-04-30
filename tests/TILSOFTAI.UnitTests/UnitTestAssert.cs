@@ -13,5 +13,19 @@ public static class UnitTestAssert
         if (!EqualityComparer<T>.Default.Equals(expected, actual))
             throw new InvalidOperationException($"Expected '{expected}', got '{actual}'.");
     }
+
+    public static async Task ThrowsAsync<TException>(Func<Task> action) where TException : Exception
+    {
+        try
+        {
+            await action();
+        }
+        catch (TException)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException($"Expected exception {typeof(TException).Name}.");
+    }
 }
 

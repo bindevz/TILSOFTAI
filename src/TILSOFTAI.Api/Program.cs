@@ -1,11 +1,8 @@
 using TILSOFTAI.Api.Middleware;
-using TILSOFTAI.Application.Abstractions;
-using TILSOFTAI.Application.Artifacts;
-using TILSOFTAI.Application.Capabilities;
-using TILSOFTAI.Application.LocalAi;
+using TILSOFTAI.Api.DependencyInjection;
 using TILSOFTAI.Application.Runs;
 using TILSOFTAI.Application.Security;
-using TILSOFTAI.Application.Tools;
+using TILSOFTAI.Application.Abstractions;
 using TILSOFTAI.Contracts.Api;
 using TILSOFTAI.Contracts.Configuration;
 
@@ -17,21 +14,7 @@ IReadOnlyList<string> validationErrors = ConfigurationValidator.Validate(options
 if (validationErrors.Count > 0 && !builder.Environment.IsEnvironment("Testing"))
     throw new InvalidOperationException("Invalid TILSOFTAI configuration: " + string.Join(" ", validationErrors));
 
-builder.Services.AddSingleton(options);
-builder.Services.AddSingleton<IRequestContextAccessor, RequestContextAccessor>();
-builder.Services.AddSingleton<IAiRunRepository, InMemoryRunRepository>();
-builder.Services.AddSingleton<ICapabilitySearchService, InMemoryCapabilitySearchService>();
-builder.Services.AddSingleton<IToolRuntime, ModelToolRuntime>();
-builder.Services.AddSingleton<ILocalAiClient, DeterministicLocalAiClient>();
-builder.Services.AddSingleton<IArtifactStore>(sp =>
-{
-    string configuredRoot = sp.GetRequiredService<TilsoftAiOptions>().Artifacts.RootPath;
-    string root = string.IsNullOrWhiteSpace(configuredRoot)
-        ? Path.Combine(AppContext.BaseDirectory, "artifacts")
-        : configuredRoot;
-    return new FileSystemArtifactStore(root, sp.GetRequiredService<IAiRunRepository>());
-});
-builder.Services.AddSingleton<AiRunOrchestrator>();
+builder.Services.AddTilsoftAiRuntime(builder.Environment, options);
 builder.Services.AddEndpointsApiExplorer();
 
 WebApplication app = builder.Build();
@@ -91,4 +74,3 @@ app.MapGet("/api/v1/ai/artifacts/{artifactId:guid}", async (
 app.Run();
 
 public partial class Program;
-

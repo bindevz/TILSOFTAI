@@ -1,10 +1,10 @@
 using TILSOFTAI.Agent.AgentOrchestrator;
-using TILSOFTAI.Application.Capabilities;
+using TILSOFTAI.Application.Testing;
 using TILSOFTAI.Contracts.Common;
 using TILSOFTAI.AgentTests;
 
 RequestContext context = new(Guid.Parse("00000000-0000-0000-0000-000000000001"), Guid.Parse("00000000-0000-0000-0000-000000000101"), Guid.NewGuid().ToString("D"), "en", DateTimeOffset.UtcNow);
-ControlledAgentWorkflow workflow = new(new InMemoryCapabilitySearchService());
+ControlledAgentWorkflow workflow = new(new TestingCapabilitySearchService());
 
 var verify = await workflow.PlanAsync(context, "Did MODEL-001 achieve its run target?", "Model", CancellationToken.None);
 AgentTestAssert.Equal("model.project.run.verify", verify.Capability.CapabilityCode);

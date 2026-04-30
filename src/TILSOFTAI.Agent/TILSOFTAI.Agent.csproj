@@ -7,10 +7,12 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="..\TILSOFTAI.Application\Abstractions\IRequestContextAccessor.cs" LinkBase="Application\Abstractions" />
-    <Compile Include="..\TILSOFTAI.Application\Abstractions\FrameworkAbstractions.cs" LinkBase="Application\Abstractions" />
-    <Compile Include="..\TILSOFTAI.Application\Capabilities\InMemoryCapabilitySearchService.cs" LinkBase="Application\Capabilities" />
-    <Compile Include="..\TILSOFTAI.Contracts\**\*.cs" Exclude="..\TILSOFTAI.Contracts\bin\**;..\TILSOFTAI.Contracts\obj\**" LinkBase="Contracts" />
+    <ProjectReference Include="..\TILSOFTAI.Application\TILSOFTAI.Application.csproj" />
+    <ProjectReference Include="..\TILSOFTAI.Contracts\TILSOFTAI.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
 </Project>

@@ -15,10 +15,17 @@ public interface IToolRuntime
     Task<ToolExecutionResult> ExecuteAsync(RequestContext context, ToolExecutionRequest request, CancellationToken cancellationToken);
 }
 
-public interface IArtifactStore
+public interface IArtifactContentStore
 {
-    Task<ArtifactWriteResult> WriteAsync(RequestContext context, ArtifactWriteRequest request, CancellationToken cancellationToken);
-    Task<ArtifactReadResult> ReadAsync(RequestContext context, Guid artifactId, CancellationToken cancellationToken);
+    Task<ArtifactContentWriteResult> WriteAsync(RequestContext context, ArtifactContentWriteRequest request, CancellationToken cancellationToken);
+    Task<string> ReadAsync(RequestContext context, ArtifactMetadataResponse metadata, CancellationToken cancellationToken);
+}
+
+public interface IArtifactRepository
+{
+    Task<ArtifactMetadataResponse> CreateAsync(RequestContext context, ArtifactMetadataCreateRequest request, CancellationToken cancellationToken);
+    Task<ArtifactMetadataResponse?> GetAsync(RequestContext context, Guid artifactId, CancellationToken cancellationToken);
+    Task CreateProvenanceAsync(RequestContext context, ProvenanceCreateRequest request, CancellationToken cancellationToken);
 }
 
 public interface ILocalAiClient
@@ -29,18 +36,38 @@ public interface ILocalAiClient
 
 public interface IAiRunRepository
 {
-    Task SaveAsync(RunState run, CancellationToken cancellationToken);
-    Task<RunState?> GetAsync(Guid tenantId, Guid runId, CancellationToken cancellationToken);
-    Task<ArtifactMetadataResponse?> GetArtifactAsync(Guid tenantId, Guid artifactId, CancellationToken cancellationToken);
+    Task CreateRunAsync(RequestContext context, RunCreateRequest request, CancellationToken cancellationToken);
+    Task UpdateRunStatusAsync(RequestContext context, RunStatusUpdate update, CancellationToken cancellationToken);
+    Task RecordToolCallAsync(RequestContext context, ToolCallRecord record, CancellationToken cancellationToken);
+    Task SaveFinalAnswerAsync(RequestContext context, Guid runId, FinalAnswer answer, CancellationToken cancellationToken);
+    Task<RunState?> GetAsync(RequestContext context, Guid runId, CancellationToken cancellationToken);
 }
 
-public sealed record ArtifactWriteRequest(Guid RunId, string ArtifactType, string ContentType, string JsonContent);
-public sealed record ArtifactWriteResult(Guid ArtifactId, ArtifactMetadataResponse Metadata, string Path);
+public interface IAgentBrain
+{
+    Task<AgentPlan> PlanAsync(RequestContext context, AgentPlanningInput input, CancellationToken cancellationToken);
+}
+
+public interface IModelParameterBinder
+{
+    ParameterBindingResult BindProjectCode(string question);
+}
+
+public sealed record ArtifactContentWriteRequest(Guid RunId, Guid ArtifactId, string ArtifactType, string JsonContent);
+public sealed record ArtifactContentWriteResult(string Path, long SizeBytes, string Sha256);
+public sealed record ArtifactMetadataCreateRequest(Guid ArtifactId, Guid RunId, string ArtifactType, string ContentType, string StoragePath, string Sha256, long SizeBytes);
+public sealed record ProvenanceCreateRequest(Guid RunId, string ToolName, IReadOnlyList<string> Filters, Guid ArtifactId);
 public sealed record ArtifactReadResult(ArtifactMetadataResponse Metadata, string JsonContent);
 public sealed record AiChatRequest(string SystemPrompt, string UserPrompt, JsonObject ContextPackage);
 public sealed record AiChatResponse(FinalAnswer Answer);
 public sealed record AiEmbeddingRequest(string Input);
 public sealed record AiEmbeddingResponse(float[] Vector, string Model);
+public sealed record RunCreateRequest(Guid RunId, string Question, string? Language, string? DomainHint);
+public sealed record RunStatusUpdate(Guid RunId, string Status, string? SelectedCapabilityCode, string? DiagnosticCode = null, string? DiagnosticMessage = null);
+public sealed record ToolCallRecord(Guid ToolCallId, Guid RunId, string ToolName, JsonObject Parameters, string Status, int RowCount, long ElapsedMilliseconds);
+public sealed record AgentPlanningInput(string Question, string? DomainHint, IReadOnlyList<CapabilityDescriptor> Candidates);
+public sealed record AgentPlan(CapabilityDescriptor? SelectedCapability, JsonObject Parameters, bool NeedsClarification, string? Message);
+public sealed record ParameterBindingResult(bool Success, string? ProjectCode, string? ErrorCode, string? Message);
 
 public sealed class RunState
 {
@@ -52,7 +79,7 @@ public sealed class RunState
     public string? SelectedCapability { get; set; }
     public List<ToolCallSummary> ToolCalls { get; } = [];
     public List<ArtifactMetadataResponse> Artifacts { get; } = [];
+    public List<AnswerProvenance> Provenance { get; } = [];
     public FinalAnswer? Answer { get; set; }
     public DateTimeOffset CreatedAtUtc { get; init; } = DateTimeOffset.UtcNow;
 }
-

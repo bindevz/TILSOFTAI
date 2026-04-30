@@ -7,8 +7,11 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="..\TILSOFTAI.Application\**\*.cs" Exclude="..\TILSOFTAI.Application\bin\**;..\TILSOFTAI.Application\obj\**" LinkBase="Application" />
-    <Compile Include="..\TILSOFTAI.Contracts\**\*.cs" Exclude="..\TILSOFTAI.Contracts\bin\**;..\TILSOFTAI.Contracts\obj\**" LinkBase="Contracts" />
+    <ProjectReference Include="..\TILSOFTAI.Agent\TILSOFTAI.Agent.csproj" />
+    <ProjectReference Include="..\TILSOFTAI.Application\TILSOFTAI.Application.csproj" />
+    <ProjectReference Include="..\TILSOFTAI.Contracts\TILSOFTAI.Contracts.csproj" />
+    <ProjectReference Include="..\TILSOFTAI.Infrastructure\TILSOFTAI.Infrastructure.csproj" />
+    <ProjectReference Include="..\TILSOFTAI.Persistence\TILSOFTAI.Persistence.csproj" />
   </ItemGroup>
 
 </Project>

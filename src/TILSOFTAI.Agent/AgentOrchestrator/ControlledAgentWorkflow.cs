@@ -15,14 +15,17 @@ public sealed class ControlledAgentWorkflow(ICapabilitySearchService capabilityS
     {
         IReadOnlyList<CapabilityDescriptor> capabilities = await capabilitySearch.SearchAsync(context, question, domainHint, cancellationToken);
         CapabilityDescriptor selected = capabilities.FirstOrDefault() ?? throw new InvalidOperationException("No shortlisted Model capability is available.");
-        return (selected, new JsonObject { ["projectCode"] = ExtractProjectCode(question) });
+        string projectCode = ExtractProjectCode(question) ?? throw new InvalidOperationException("Project code is required.");
+        return (selected, new JsonObject { ["projectCode"] = projectCode });
     }
 
-    private static string ExtractProjectCode(string question)
+    private static string? ExtractProjectCode(string question)
     {
         string token = question.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .FirstOrDefault(part => part.StartsWith("MODEL-", StringComparison.OrdinalIgnoreCase)) ?? "MODEL-001";
+            .FirstOrDefault(part => part.StartsWith("MODEL-", StringComparison.OrdinalIgnoreCase)) ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(token))
+            return null;
+
         return token.TrimEnd('.', '?', ',', ';', ':').ToUpperInvariant();
     }
 }
-
