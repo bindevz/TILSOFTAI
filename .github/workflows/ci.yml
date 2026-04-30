@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build
+        run: dotnet build TILSOFTAI.sln --configuration Release /p:RestoreConfigFile=NuGet.Config
+      - name: Test
+        run: dotnet test TILSOFTAI.sln --configuration Release --no-build /p:RestoreConfigFile=NuGet.Config
+      - name: Acceptance suites
+        run: |
+          dotnet run --project tests/TILSOFTAI.UnitTests/TILSOFTAI.UnitTests.csproj --configuration Release --no-build
+          dotnet run --project tests/TILSOFTAI.IntegrationTests/TILSOFTAI.IntegrationTests.csproj --configuration Release --no-build
+          dotnet run --project tests/TILSOFTAI.AgentTests/TILSOFTAI.AgentTests.csproj --configuration Release --no-build
+          dotnet run --project tests/TILSOFTAI.SqlTests/TILSOFTAI.SqlTests.csproj --configuration Release --no-build

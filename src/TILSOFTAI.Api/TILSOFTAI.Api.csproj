@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\TILSOFTAI.Application\**\*.cs" Exclude="..\TILSOFTAI.Application\bin\**;..\TILSOFTAI.Application\obj\**" LinkBase="Application" />
+    <Compile Include="..\TILSOFTAI.Contracts\**\*.cs" Exclude="..\TILSOFTAI.Contracts\bin\**;..\TILSOFTAI.Contracts\obj\**" LinkBase="Contracts" />
+  </ItemGroup>
+
+</Project>

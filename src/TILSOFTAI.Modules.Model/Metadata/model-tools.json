@@ -1,0 +1,21 @@
+[
+  {
+    "capabilityCode": "model.project.run.verify",
+    "toolName": "Model.GetProjectRunVerification",
+    "permission": "model.project.run.read",
+    "sqlProcedure": "model.usp_GetProjectRunVerification"
+  },
+  {
+    "capabilityCode": "model.project.run.latest",
+    "toolName": "Model.GetLatestProjectRun",
+    "permission": "model.project.run.read",
+    "sqlProcedure": "model.usp_GetLatestProjectRun"
+  },
+  {
+    "capabilityCode": "model.project.run.failed_checks",
+    "toolName": "Model.GetFailedRunChecks",
+    "permission": "model.project.run.read",
+    "sqlProcedure": "model.usp_GetFailedRunChecks"
+  }
+]
+
