@@ -1,0 +1,12 @@
+bin/
+obj/
+.dotnet_home/
+.appdata/
+.localappdata/
+.msbuild/
+artifacts/
+TestResults/
+*.user
+*.suo
+
+/.vs/TILSOFTAI/FileContentIndex/54ed372f-66e0-482e-b320-192367add16f.vsidx
